@@ -3,10 +3,8 @@ import re
 import requests
 from urllib.parse import quote
 
-# Configuração inicial da página
 st.set_page_config(page_title="Testar Xtream API", layout="centered")
 
-# Remover espaço superior da página
 st.markdown("""
     <style>
         .block-container {
@@ -15,16 +13,17 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Título com fonte menor (estilo h5)
 st.markdown("""
     <h5 style='margin-bottom: 0.1rem;'>🔌 Testar Xtream API</h5>
 """, unsafe_allow_html=True)
 
-# Estado da sessão para valor inicial
-if "clipboard_value" not in st.session_state:
-    st.session_state.clipboard_value = ""
+if "m3u_input_value" not in st.session_state:
+    st.session_state.m3u_input_value = ""
 
-# Função para extrair partes da URL M3U
+def clear_input():
+    st.session_state.m3u_input_value = ""
+    st.session_state.form_submitted = False
+
 def parse_m3u_url(m3u_url):
     try:
         base_match = re.search(r"(https?://[^/]+(?::\d+)?)", m3u_url)
@@ -36,12 +35,17 @@ def parse_m3u_url(m3u_url):
     except Exception:
         return None, None, None
 
-# Criar um formulário para capturar a URL e executar ao pressionar Enter
 with st.form(key="m3u_form"):
-    m3u_url = st.text_input("Cole a URL do M3U", value=st.session_state.clipboard_value, key="m3u_input")
-    submit_button = st.form_submit_button("🔍 Testar API")  # Botão opcional, mas ação ocorre com Enter
+    # O valor vem do estado, não há value fixo no widget, pois é controlado pela key
+    m3u_url = st.text_input("Cole a URL do M3U", key="m3u_input_value")
+    
+    col1, col2 = st.columns([1,1])
+    with col1:
+        submit_button = st.form_submit_button("🔍 Testar API")
+    with col2:
+        # Passa a função clear_input como callback para o botão Limpar
+        clear_button = st.form_submit_button("🧹 Limpar", on_click=clear_input)
 
-    # Lógica executada ao submeter o formulário (com Enter ou clicando no botão)
     if submit_button or st.session_state.get("form_submitted", False):
         if not m3u_url:
             st.warning("⚠️ Por favor, insira uma URL M3U válida.")
@@ -80,9 +84,7 @@ with st.form(key="m3u_form"):
                 else:
                     st.warning("⚠️ A URL está incompleta ou mal formatada. Verifique se contém 'username' e 'password'.")
 
-# Atualizar estado para detectar submissão automática
-if m3u_url and m3u_url != st.session_state.clipboard_value:
+if st.session_state.m3u_input_value:
     st.session_state.form_submitted = True
-    st.session_state.clipboard_value = m3u_url
 else:
     st.session_state.form_submitted = False
