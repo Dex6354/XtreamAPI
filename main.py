@@ -61,7 +61,7 @@ def parse_urls(message):
     m3u_pattern = r"(https?://[^\s]+?get\.php\?username=[^\s&]+&password=[^\s&]+&type=m3u_plus(?:&output=[^\s]+)?)"
     api_pattern = r"(https?://[^\s]+?player_api\.php\?username=[^\s&]+&password=[^\s&]+)"
     urls = re.findall(m3u_pattern, message) + re.findall(api_pattern, message)
-    
+
     parsed_urls = []
     unique_urls = set()
 
@@ -71,12 +71,12 @@ def parse_urls(message):
         base_match = re.search(r"(https?://[^/]+(?::\d+)?)", current_url)
         user_match = re.search(r"username=([^&]+)", current_url)
         pwd_match = re.search(r"password=([^&]+)", current_url)
-        
+
         if base_match and user_match and pwd_match:
             base = base_match.group(1).replace("https://", "http://")
             username = user_match.group(1)
             password = pwd_match.group(1)
-            
+
             identifier = (base, username, password)
             if identifier not in unique_urls:
                 unique_urls.add(identifier)
@@ -87,6 +87,46 @@ def parse_urls(message):
                     "password": password
                 })
     return parsed_urls
+
+def get_series_details(base_url, username, password, series_id):
+    """
+    Busca informações detalhadas de uma série, incluindo o número de temporadas
+    e o último episódio.
+    """
+    try:
+        series_info_url = f"{base_url}/player_api.php?username={quote(username)}&password={quote(password)}&action=get_series_info&series_id={series_id}"
+        response = requests.get(series_info_url, timeout=10)
+        response.raise_for_status()
+        series_data = response.json()
+
+        if not series_data or "episodes" not in series_data:
+            return None
+
+        episodes_by_season = series_data.get("episodes", {})
+
+        # Encontra a última temporada
+        latest_season_number = max(
+            int(season_num) for season_num in episodes_by_season.keys() if season_num.isdigit()
+        )
+        latest_season = episodes_by_season.get(str(latest_season_number), [])
+
+        # Encontra o último episódio da última temporada
+        if latest_season:
+            latest_episode = latest_season[-1]
+            title = latest_episode.get("title", "")
+
+            # Tenta extrair SXXEXX com regex
+            match = re.search(r"S(\d+)E(\d+)", title, re.IGNORECASE)
+            if match:
+                s_e_string = match.group(0).upper()
+            else:
+                s_e_string = f"S{latest_season_number:02d}E{len(latest_season):02d}"
+
+            return s_e_string
+
+    except (requests.exceptions.RequestException, ValueError, KeyError):
+        return None
+    return None
 
 def get_xtream_info(parsed_url_data, search_name=None):
     """
@@ -104,7 +144,7 @@ def get_xtream_info(parsed_url_data, search_name=None):
         "Accept": "application/json",
         "Connection": "close"
     }
-    
+
     result = {
         "is_json": False, "real_server": base, "exp_date": "Falha no login",
         "active_cons": "N/A", "max_connections": "N/A", "has_adult_content": False,
@@ -116,7 +156,7 @@ def get_xtream_info(parsed_url_data, search_name=None):
         response = requests.get(api_url, headers=headers, timeout=10, allow_redirects=True)
         response.raise_for_status()
         json_data = response.json()
-        
+
         if not json_data or "user_info" not in json_data:
              return parsed_url_data, result
 
@@ -138,13 +178,13 @@ def get_xtream_info(parsed_url_data, search_name=None):
             result["exp_date"] = "Nunca expira" if int(exp_date_ts) > time.time() * 2 else datetime.fromtimestamp(int(exp_date_ts)).strftime('%d/%m/%Y')
         else:
             result["exp_date"] = "N/A"
-        
+
         result["active_cons"] = user_info.get("active_cons", "N/A")
         result["max_connections"] = user_info.get("max_connections", "N/A")
 
         api_base_url = f"{result['real_server']}/player_api.php?username={username_encoded}&password={password_encoded}"
         adult_keywords = ["adulto", "adultos", "xxx", "+18"]
-        
+
         with ThreadPoolExecutor(max_workers=3) as cat_executor:
             actions = ["get_live_categories", "get_vod_categories", "get_series_categories"]
             futures = {cat_executor.submit(lambda: requests.get(f"{api_base_url}&action={a}", headers=headers, timeout=15).json()): a for a in actions}
@@ -156,29 +196,43 @@ def get_xtream_info(parsed_url_data, search_name=None):
                         break
                 except:
                     continue
-        
+
         with ThreadPoolExecutor(max_workers=3) as count_executor:
             actions = {"live": "get_live_streams", "vod": "get_vod_streams", "series": "get_series"}
             futures = {count_executor.submit(lambda: requests.get(f"{api_base_url}&action={a}", headers=headers, timeout=15).json()): k for k, a in actions.items()}
-            
+
             if search_name:
                 normalized_search = normalize_text(search_name)
-                result["search_matches"] = {"Canais": [], "Filmes": [], "Séries": []} # Inicializa as listas de cada categoria
-            
+                result["search_matches"] = {"Canais": [], "Filmes": [], "Séries": {}} # Inicializa as listas de cada categoria
+
             for future in as_completed(futures):
                 key = futures[future]
                 try:
                     data = future.result()
                     result[f"{key}_count"] = len(data) if data else 0
                     if search_name and data:
-                        matches = [item["name"] for item in data if normalized_search in normalize_text(item.get("name",""))]
-                        if matches:
-                            if key == "live":
-                                result["search_matches"]["Canais"].extend(matches)
-                            elif key == "vod":
-                                result["search_matches"]["Filmes"].extend(matches)
-                            elif key == "series":
-                                result["search_matches"]["Séries"].extend(matches)
+                        if key == "series":
+                            # Processamento especial para séries
+                            series_matches = [
+                                item for item in data if normalized_search in normalize_text(item.get("name", ""))
+                            ]
+                            for series in series_matches:
+                                series_id = series.get("series_id")
+                                series_name = series.get("name")
+                                # Aqui a nova função é chamada
+                                s_e = get_series_details(result['real_server'], username, password, series_id)
+
+                                if s_e:
+                                    result["search_matches"]["Séries"][series_name] = s_e
+                                else:
+                                    result["search_matches"]["Séries"][series_name] = "N/A"
+                        else:
+                            matches = [item["name"] for item in data if normalized_search in normalize_text(item.get("name", ""))]
+                            if matches:
+                                if key == "live":
+                                    result["search_matches"]["Canais"].extend(matches)
+                                elif key == "vod":
+                                    result["search_matches"]["Filmes"].extend(matches)
                 except:
                     continue
 
@@ -205,7 +259,7 @@ with st.form(key="m3u_form"):
         else:
             with st.spinner("Analisando APIs em paralelo... Isso será rápido!"):
                 parsed_urls = parse_urls(m3u_message)
-                
+
                 if not parsed_urls:
                     st.warning("⚠️ Nenhuma URL válida encontrada na mensagem.")
                 else:
@@ -215,7 +269,7 @@ with st.form(key="m3u_form"):
                         for future in as_completed(future_to_url):
                             original_data, api_result = future.result()
                             api_url = f"{original_data['base']}/player_api.php?username={quote(original_data['username'])}&password={quote(original_data['password'])}"
-                            
+
                             results.append({
                                 "api_url": api_url,
                                 "username": original_data["username"],
@@ -227,13 +281,13 @@ with st.form(key="m3u_form"):
 
                     st.markdown("---")
                     st.markdown("#### Resultados")
-                    
+
                     if not results:
                         st.info("Nenhuma URL foi processada.")
                     else:
                         for result in results:
                             status = "✅" if result["is_json"] else "❌"
-                            
+
                             st.markdown(
                                 f"**{status} API URL:** <a href='{result['api_url']}' target='_blank'>{result['api_url']}</a>",
                                 unsafe_allow_html=True
@@ -263,8 +317,15 @@ with st.form(key="m3u_form"):
                                         for category, matches in result["search_matches"].items():
                                             if matches:
                                                 st.markdown(f"**{category}:**")
-                                                matches_text = "\n".join([f"- {match}" for match in matches])
-                                                st.markdown(matches_text)
+                                                if category == "Séries":
+                                                    for series_name, s_e_info in matches.items():
+                                                        if s_e_info != "N/A":
+                                                            st.markdown(f"- **{series_name}** ({s_e_info})")
+                                                        else:
+                                                            st.markdown(f"- **{series_name}** (Detalhes não disponíveis)")
+                                                else:
+                                                    matches_text = "\n".join([f"- {match}" for match in matches])
+                                                    st.markdown(matches_text)
                             st.markdown("---") 
 
 if st.session_state.m3u_input_value:
