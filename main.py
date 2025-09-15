@@ -5,6 +5,7 @@ from urllib.parse import quote, urlparse
 from datetime import datetime
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import unicodedata # Adicionando a biblioteca para normalização
 
 # Configuração da página do Streamlit
 st.set_page_config(page_title="Testar Xtream API", layout="centered")
@@ -46,6 +47,14 @@ def clear_input():
     st.session_state.m3u_input_value = ""
     st.session_state.search_name = ""
     st.session_state.form_submitted = False
+
+def normalize_text(text):
+    """Normaliza o texto, removendo acentos, cedilha e convertendo para minúsculas."""
+    if not isinstance(text, str):
+        return ""
+    text = text.lower()
+    normalized = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
+    return normalized
 
 def parse_urls(message):
     """Extrai URLs M3U e Player API da mensagem de texto, evitando duplicatas."""
@@ -142,7 +151,7 @@ def get_xtream_info(parsed_url_data, search_name=None):
             for future in as_completed(futures):
                 try:
                     categories = future.result()
-                    if categories and any(keyword in cat.get("category_name", "").lower() for cat in categories for keyword in adult_keywords):
+                    if categories and any(keyword in normalize_text(cat.get("category_name", "")) for cat in categories for keyword in adult_keywords):
                         result["has_adult_content"] = True
                         break
                 except:
@@ -157,8 +166,8 @@ def get_xtream_info(parsed_url_data, search_name=None):
                     data = future.result()
                     result[f"{key}_count"] = len(data) if data else 0
                     if search_name and data:
-                        name_lower = search_name.lower()
-                        matches = [item["name"] for item in data if name_lower in item.get("name","").lower()]
+                        normalized_search = normalize_text(search_name)
+                        matches = [item["name"] for item in data if normalized_search in normalize_text(item.get("name",""))]
                         if matches:
                             result["search_matches"].extend(matches)
                 except:
@@ -236,10 +245,8 @@ with st.form(key="m3u_form"):
                                 - **Filmes:** `{result['vod_count']}`
                                 - **Séries:** `{result['series_count']}`
                                 """)
-                                # Exibição dos resultados da busca com espaçamento mínimo
                                 if search_name and result["search_matches"]:
                                     st.markdown("**🔎 Resultados encontrados:**")
-                                    # Cria uma única string com todos os itens separados por quebra de linha
                                     matches_text = "\n".join([f"- {match}" for match in result["search_matches"]])
                                     st.markdown(matches_text)
                             st.markdown("---") 
