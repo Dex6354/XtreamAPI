@@ -74,54 +74,89 @@ def parse_urls(message):
                 })
     return parsed_urls
 
-def test_api(base, username, password):
-    """Testa a API Xtream e retorna informações detalhadas do usuário e do servidor."""
+def get_xtream_info(base, username, password):
+    """
+    Testa o login na API Xtream e, se bem-sucedido, busca contagem de mídias
+    e verifica a existência de conteúdo adulto.
+    """
     username_encoded = quote(username)
     password_encoded = quote(password)
     api_url = f"{base}/player_api.php?username={username_encoded}&password={password_encoded}"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0",
         "Accept": "application/json"
     }
+    
+    # Dicionário de resultados padrão
+    result = {
+        "is_json": False,
+        "real_server": base,
+        "exp_date": "Falha no login",
+        "active_cons": "N/A",
+        "max_connections": "N/A",
+        "has_adult_content": False,
+        "live_count": 0,
+        "vod_count": 0,
+        "series_count": 0
+    }
+
     try:
+        # 1. Teste de Login
         response = requests.get(api_url, headers=headers, timeout=10, allow_redirects=True)
         response.raise_for_status()
         json_data = response.json()
-
-        server_info = json_data.get("server_info", {})
-        real_server = server_info.get("url", base)
         
-        # Garante que a URL real tenha o prefixo http://
+        if not json_data or "user_info" not in json_data:
+             return result
+
+        result["is_json"] = True
+        user_info = json_data.get("user_info", {})
+        server_info = json_data.get("server_info", {})
+
+        # Atualiza informações básicas
+        real_server = server_info.get("url", base)
         if not real_server.startswith(("http://", "https://")):
             real_server = "http://" + real_server
-        real_server = real_server.replace("https://", "http://").rstrip("/")
+        result["real_server"] = real_server.replace("https://", "http://").rstrip("/")
 
-        user_info = json_data.get("user_info", {})
         exp_date_ts = user_info.get("exp_date")
-        
         if exp_date_ts and str(exp_date_ts).isdigit():
-            if int(exp_date_ts) > time.time() * 2:
-                 exp_date_str = "Nunca expira"
-            else:
-                 exp_date_str = datetime.fromtimestamp(int(exp_date_ts)).strftime('%d/%m/%Y %H:%M:%S')
+            result["exp_date"] = "Nunca expira" if int(exp_date_ts) > time.time() * 2 else datetime.fromtimestamp(int(exp_date_ts)).strftime('%d/%m/%Y')
         else:
-            exp_date_str = "N/A"
+            result["exp_date"] = "N/A"
+        
+        result["active_cons"] = user_info.get("active_cons", "N/A")
+        result["max_connections"] = user_info.get("max_connections", "N/A")
 
-        return {
-            "is_json": True,
-            "real_server": real_server,
-            "exp_date": exp_date_str,
-            "active_cons": user_info.get("active_cons", "N/A"),
-            "max_connections": user_info.get("max_connections", "N/A"),
-        }
+        # Se o login funcionou, continue para as outras chamadas
+        api_base_url = f"{result['real_server']}/player_api.php?username={username_encoded}&password={password_encoded}"
+        adult_keywords = ["adulto", "adultos", "xxx", "+18"]
+
+        def make_api_request(action):
+            try:
+                r = requests.get(f"{api_base_url}&action={action}", headers=headers, timeout=15)
+                r.raise_for_status()
+                return r.json() if r.text else []
+            except (requests.exceptions.RequestException, ValueError):
+                return []
+
+        # 2. Verificação de Conteúdo Adulto
+        for action in ["get_live_categories", "get_vod_categories", "get_series_categories"]:
+            categories = make_api_request(action)
+            if categories and any(keyword in cat.get("category_name", "").lower() for cat in categories for keyword in adult_keywords):
+                result["has_adult_content"] = True
+                break
+        
+        # 3. Contagem de Mídia
+        result["live_count"] = len(make_api_request("get_live_streams"))
+        result["vod_count"] = len(make_api_request("get_vod_streams"))
+        result["series_count"] = len(make_api_request("get_series"))
+
+        return result
+
     except (requests.exceptions.RequestException, ValueError):
-        return {
-            "is_json": False,
-            "real_server": base,
-            "exp_date": "Falha ao obter",
-            "active_cons": "Falha ao obter",
-            "max_connections": "Falha ao obter",
-        }
+        return result
+
 
 # Criação do formulário na interface
 with st.form(key="m3u_form"):
@@ -138,7 +173,7 @@ with st.form(key="m3u_form"):
         if not m3u_message:
             st.warning("⚠️ Por favor, insira uma mensagem com URLs.")
         else:
-            with st.spinner("Analisando e testando as APIs..."):
+            with st.spinner("Analisando login, categorias e mídias... Isso pode levar um momento."):
                 parsed_urls = parse_urls(m3u_message)
                 
                 if not parsed_urls:
@@ -147,7 +182,7 @@ with st.form(key="m3u_form"):
                     results = []
                     
                     for parsed in parsed_urls:
-                        api_result = test_api(parsed["base"], parsed["username"], parsed["password"])
+                        api_result = get_xtream_info(parsed["base"], parsed["username"], parsed["password"])
                         api_url = f"{parsed['base']}/player_api.php?username={quote(parsed['username'])}&password={quote(parsed['password'])}"
                         
                         results.append({
@@ -157,7 +192,6 @@ with st.form(key="m3u_form"):
                             **api_result
                         })
 
-                    # Ordena a lista: resultados com JSON vêm primeiro (True=1, False=0)
                     results.sort(key=lambda item: item['is_json'], reverse=True)
 
                     st.markdown("---")
@@ -167,32 +201,27 @@ with st.form(key="m3u_form"):
                         st.info("Nenhuma URL foi processada.")
                     else:
                         for result in results:
-                            # O status agora depende apenas se a API retornou JSON
                             status = "✅" if result["is_json"] else "❌"
                             
-                            # Exibe a URL da API como um link clicável
                             st.markdown(
                                 f"**{status} API URL:** <a href='{result['api_url']}' target='_blank'>{result['api_url']}</a>",
                                 unsafe_allow_html=True
                             )
 
-                            # Container para agrupar as informações de depuração
                             with st.container(border=True):
-                                # Campos com botão para copiar
-                                st.text("Usuário:")
-                                st.code(result['username'], language="text")
-                                st.text("Senha:")
-                                st.code(result['password'], language="text")
-                                st.text("URL Real:")
-                                st.code(result['real_server'], language="text")
+                                adult_emoji = "🔞 Contém" if result['has_adult_content'] else "✅ Não Contém"
+                                st.markdown(f"""
+                                - **Usuário:** `{result['username']}`
+                                - **Senha:** `{result['password']}`
+                                - **URL Real:** `{result['real_server']}`
+                                - **Expira em:** `{result['exp_date']}`
+                                - **Conexões:** `{result['active_cons']}` / `{result['max_connections']}`
+                                - **Conteúdo Adulto:** {adult_emoji}
+                                - **Mídia:** `{result['live_count']}` Canais | `{result['vod_count']}` Filmes | `{result['series_count']}` Séries
+                                """)
+                            st.markdown("---") 
 
-                                # Campos de informação sem botão de cópia
-                                st.markdown(f"**Data de Expiração:** `{result['exp_date']}`")
-                                st.markdown(f"**Usuários Ativos:** `{result['active_cons']}`")
-                                st.markdown(f"**Usuários Máximos:** `{result['max_connections']}`")
-                            st.markdown("---") # Separador visual
-
-# Mantém o formulário submetido se houver texto, para evitar que os resultados desapareçam
+# Mantém o formulário submetido se houver texto
 if st.session_state.m3u_input_value:
     st.session_state.form_submitted = True
 else:
