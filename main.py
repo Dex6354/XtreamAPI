@@ -79,7 +79,7 @@ def parse_urls(message):
                 })
     return parsed_urls
 
-def get_xtream_info(parsed_url_data, search_name=None): # Adicionado search_name como argumento
+def get_xtream_info(parsed_url_data, search_name=None):
     """
     Função wrapper para testar uma única URL. Retorna os dados originais e os resultados.
     """
@@ -93,14 +93,14 @@ def get_xtream_info(parsed_url_data, search_name=None): # Adicionado search_name
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Accept": "application/json",
-        "Connection": "close" # Ajuda a evitar erros de conexão em massa
+        "Connection": "close"
     }
     
     result = {
         "is_json": False, "real_server": base, "exp_date": "Falha no login",
         "active_cons": "N/A", "max_connections": "N/A", "has_adult_content": False,
         "is_accepted_domain": False, "live_count": 0, "vod_count": 0, "series_count": 0,
-        "search_matches": [] # Adicionado para armazenar os resultados da busca
+        "search_matches": []
     }
 
     try:
@@ -136,7 +136,6 @@ def get_xtream_info(parsed_url_data, search_name=None): # Adicionado search_name
         api_base_url = f"{result['real_server']}/player_api.php?username={username_encoded}&password={password_encoded}"
         adult_keywords = ["adulto", "adultos", "xxx", "+18"]
         
-        # Otimização: buscar todas as categorias em paralelo
         with ThreadPoolExecutor(max_workers=3) as cat_executor:
             actions = ["get_live_categories", "get_vod_categories", "get_series_categories"]
             futures = {cat_executor.submit(lambda: requests.get(f"{api_base_url}&action={a}", headers=headers, timeout=15).json()): a for a in actions}
@@ -145,11 +144,10 @@ def get_xtream_info(parsed_url_data, search_name=None): # Adicionado search_name
                     categories = future.result()
                     if categories and any(keyword in cat.get("category_name", "").lower() for cat in categories for keyword in adult_keywords):
                         result["has_adult_content"] = True
-                        break # Encontrou, pode parar de verificar
+                        break
                 except:
-                    continue # Ignora falhas na busca de categorias
+                    continue
         
-        # Otimização: buscar contagem de mídia e pesquisa em paralelo
         with ThreadPoolExecutor(max_workers=3) as count_executor:
             actions = {"live": "get_live_streams", "vod": "get_vod_streams", "series": "get_series"}
             futures = {count_executor.submit(lambda: requests.get(f"{api_base_url}&action={a}", headers=headers, timeout=15).json()): k for k, a in actions.items()}
@@ -158,14 +156,13 @@ def get_xtream_info(parsed_url_data, search_name=None): # Adicionado search_name
                 try:
                     data = future.result()
                     result[f"{key}_count"] = len(data) if data else 0
-                    # Lógica de busca por nome
                     if search_name and data:
                         name_lower = search_name.lower()
                         matches = [item["name"] for item in data if name_lower in item.get("name","").lower()]
                         if matches:
                             result["search_matches"].extend(matches)
                 except:
-                    continue # Ignora falhas na contagem
+                    continue
 
         return parsed_url_data, result
 
@@ -176,7 +173,7 @@ def get_xtream_info(parsed_url_data, search_name=None): # Adicionado search_name
 # Criação do formulário na interface
 with st.form(key="m3u_form"):
     m3u_message = st.text_area("Cole a mensagem com URLs M3U ou Player API", key="m3u_input_value", height=200)
-    search_name = st.text_input("🔍 Buscar canal, filme ou série (opcional)", key="search_name") # Campo de busca
+    search_name = st.text_input("🔍 Buscar canal, filme ou série (opcional)", key="search_name")
 
     col1, col2 = st.columns([1,1])
     with col1:
@@ -195,9 +192,8 @@ with st.form(key="m3u_form"):
                     st.warning("⚠️ Nenhuma URL válida encontrada na mensagem.")
                 else:
                     results = []
-                    # Usando ThreadPoolExecutor para processar URLs em paralelo
-                    with ThreadPoolExecutor(max_workers=10) as executor: # Aumente os workers se tiver muitas URLs
-                        future_to_url = {executor.submit(get_xtream_info, url_data, search_name): url_data for url_data in parsed_urls} # Passa o termo de busca
+                    with ThreadPoolExecutor(max_workers=10) as executor:
+                        future_to_url = {executor.submit(get_xtream_info, url_data, search_name): url_data for url_data in parsed_urls}
                         for future in as_completed(future_to_url):
                             original_data, api_result = future.result()
                             api_url = f"{original_data['base']}/player_api.php?username={quote(original_data['username'])}&password={quote(original_data['password'])}"
@@ -240,11 +236,12 @@ with st.form(key="m3u_form"):
                                 - **Filmes:** `{result['vod_count']}`
                                 - **Séries:** `{result['series_count']}`
                                 """)
-                                # Exibição dos resultados da busca
+                                # Exibição dos resultados da busca com espaçamento mínimo
                                 if search_name and result["search_matches"]:
                                     st.markdown("**🔎 Resultados encontrados:**")
-                                    for match in result["search_matches"]:
-                                        st.markdown(f"- {match}")
+                                    # Cria uma única string com todos os itens separados por quebra de linha
+                                    matches_text = "\n".join([f"- {match}" for match in result["search_matches"]])
+                                    st.markdown(matches_text)
                             st.markdown("---") 
 
 if st.session_state.m3u_input_value:
