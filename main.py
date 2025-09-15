@@ -5,7 +5,7 @@ from urllib.parse import quote, urlparse
 from datetime import datetime
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import unicodedata # Adicionando a biblioteca para normalização
+import unicodedata
 
 # Configuração da página do Streamlit
 st.set_page_config(page_title="Testar Xtream API", layout="centered")
@@ -109,7 +109,7 @@ def get_xtream_info(parsed_url_data, search_name=None):
         "is_json": False, "real_server": base, "exp_date": "Falha no login",
         "active_cons": "N/A", "max_connections": "N/A", "has_adult_content": False,
         "is_accepted_domain": False, "live_count": 0, "vod_count": 0, "series_count": 0,
-        "search_matches": []
+        "search_matches": {} # Alterado para um dicionário para armazenar por categoria
     }
 
     try:
@@ -160,16 +160,25 @@ def get_xtream_info(parsed_url_data, search_name=None):
         with ThreadPoolExecutor(max_workers=3) as count_executor:
             actions = {"live": "get_live_streams", "vod": "get_vod_streams", "series": "get_series"}
             futures = {count_executor.submit(lambda: requests.get(f"{api_base_url}&action={a}", headers=headers, timeout=15).json()): k for k, a in actions.items()}
+            
+            if search_name:
+                normalized_search = normalize_text(search_name)
+                result["search_matches"] = {"Canais": [], "Filmes": [], "Séries": []} # Inicializa as listas de cada categoria
+            
             for future in as_completed(futures):
                 key = futures[future]
                 try:
                     data = future.result()
                     result[f"{key}_count"] = len(data) if data else 0
                     if search_name and data:
-                        normalized_search = normalize_text(search_name)
                         matches = [item["name"] for item in data if normalized_search in normalize_text(item.get("name",""))]
                         if matches:
-                            result["search_matches"].extend(matches)
+                            if key == "live":
+                                result["search_matches"]["Canais"].extend(matches)
+                            elif key == "vod":
+                                result["search_matches"]["Filmes"].extend(matches)
+                            elif key == "series":
+                                result["search_matches"]["Séries"].extend(matches)
                 except:
                     continue
 
@@ -245,10 +254,17 @@ with st.form(key="m3u_form"):
                                 - **Filmes:** `{result['vod_count']}`
                                 - **Séries:** `{result['series_count']}`
                                 """)
-                                if search_name and result["search_matches"]:
-                                    st.markdown("**🔎 Resultados encontrados:**")
-                                    matches_text = "\n".join([f"- {match}" for match in result["search_matches"]])
-                                    st.markdown(matches_text)
+                                # Exibição dos resultados por subcategoria
+                                if search_name:
+                                    # Verificar se existe algum resultado em qualquer categoria
+                                    if any(result["search_matches"].values()):
+                                        st.markdown("**🔎 Resultados encontrados:**")
+                                        # Iterar sobre as categorias e seus respectivos resultados
+                                        for category, matches in result["search_matches"].items():
+                                            if matches:
+                                                st.markdown(f"**{category}:**")
+                                                matches_text = "\n".join([f"- {match}" for match in matches])
+                                                st.markdown(matches_text)
                             st.markdown("---") 
 
 if st.session_state.m3u_input_value:
