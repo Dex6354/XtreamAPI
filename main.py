@@ -34,13 +34,17 @@ st.markdown("""
     </p>
 """, unsafe_allow_html=True)
 
-# Inicializa o estado da sessão para o campo de texto
+# Inicializa o estado da sessão para o campo de texto e pesquisa
 if "m3u_input_value" not in st.session_state:
     st.session_state.m3u_input_value = ""
+
+if "search_name" not in st.session_state:
+    st.session_state.search_name = ""
 
 def clear_input():
     """Limpa o campo de texto e re-define o estado do formulário."""
     st.session_state.m3u_input_value = ""
+    st.session_state.search_name = ""
     st.session_state.form_submitted = False
 
 def parse_urls(message):
@@ -75,7 +79,7 @@ def parse_urls(message):
                 })
     return parsed_urls
 
-def get_xtream_info(parsed_url_data):
+def get_xtream_info(parsed_url_data, search_name=None): # Adicionado search_name como argumento
     """
     Função wrapper para testar uma única URL. Retorna os dados originais e os resultados.
     """
@@ -95,7 +99,8 @@ def get_xtream_info(parsed_url_data):
     result = {
         "is_json": False, "real_server": base, "exp_date": "Falha no login",
         "active_cons": "N/A", "max_connections": "N/A", "has_adult_content": False,
-        "is_accepted_domain": False, "live_count": 0, "vod_count": 0, "series_count": 0
+        "is_accepted_domain": False, "live_count": 0, "vod_count": 0, "series_count": 0,
+        "search_matches": [] # Adicionado para armazenar os resultados da busca
     }
 
     try:
@@ -144,7 +149,7 @@ def get_xtream_info(parsed_url_data):
                 except:
                     continue # Ignora falhas na busca de categorias
         
-        # Otimização: buscar contagem de mídia em paralelo
+        # Otimização: buscar contagem de mídia e pesquisa em paralelo
         with ThreadPoolExecutor(max_workers=3) as count_executor:
             actions = {"live": "get_live_streams", "vod": "get_vod_streams", "series": "get_series"}
             futures = {count_executor.submit(lambda: requests.get(f"{api_base_url}&action={a}", headers=headers, timeout=15).json()): k for k, a in actions.items()}
@@ -153,6 +158,12 @@ def get_xtream_info(parsed_url_data):
                 try:
                     data = future.result()
                     result[f"{key}_count"] = len(data) if data else 0
+                    # Lógica de busca por nome
+                    if search_name and data:
+                        name_lower = search_name.lower()
+                        matches = [item["name"] for item in data if name_lower in item.get("name","").lower()]
+                        if matches:
+                            result["search_matches"].extend(matches)
                 except:
                     continue # Ignora falhas na contagem
 
@@ -165,6 +176,7 @@ def get_xtream_info(parsed_url_data):
 # Criação do formulário na interface
 with st.form(key="m3u_form"):
     m3u_message = st.text_area("Cole a mensagem com URLs M3U ou Player API", key="m3u_input_value", height=200)
+    search_name = st.text_input("🔍 Buscar canal, filme ou série (opcional)", key="search_name") # Campo de busca
 
     col1, col2 = st.columns([1,1])
     with col1:
@@ -185,7 +197,7 @@ with st.form(key="m3u_form"):
                     results = []
                     # Usando ThreadPoolExecutor para processar URLs em paralelo
                     with ThreadPoolExecutor(max_workers=10) as executor: # Aumente os workers se tiver muitas URLs
-                        future_to_url = {executor.submit(get_xtream_info, url_data): url_data for url_data in parsed_urls}
+                        future_to_url = {executor.submit(get_xtream_info, url_data, search_name): url_data for url_data in parsed_urls} # Passa o termo de busca
                         for future in as_completed(future_to_url):
                             original_data, api_result = future.result()
                             api_url = f"{original_data['base']}/player_api.php?username={quote(original_data['username'])}&password={quote(original_data['password'])}"
@@ -228,6 +240,11 @@ with st.form(key="m3u_form"):
                                 - **Filmes:** `{result['vod_count']}`
                                 - **Séries:** `{result['series_count']}`
                                 """)
+                                # Exibição dos resultados da busca
+                                if search_name and result["search_matches"]:
+                                    st.markdown("**🔎 Resultados encontrados:**")
+                                    for match in result["search_matches"]:
+                                        st.markdown(f"- {match}")
                             st.markdown("---") 
 
 if st.session_state.m3u_input_value:
