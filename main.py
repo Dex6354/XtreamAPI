@@ -310,23 +310,25 @@ with st.form(key="m3u_form"):
                                 """)
                                 # Exibição dos resultados por subcategoria
                                 if search_name:
-                                    # Verificar se existe algum resultado em qualquer categoria
                                     if any(result["search_matches"].values()):
                                         st.markdown("**🔎 Resultados encontrados:**")
-                                        # Iterar sobre as categorias e seus respectivos resultados
                                         for category, matches in result["search_matches"].items():
                                             if matches:
                                                 st.markdown(f"**{category}:**")
+                                                # Cria uma lista de strings formatadas e une com quebras de linha
                                                 if category == "Séries":
+                                                    series_list = []
                                                     for series_name, s_e_info in matches.items():
                                                         if s_e_info != "N/A":
-                                                            st.markdown(f"- **{series_name}** ({s_e_info})")
+                                                            series_list.append(f"- **{series_name}** ({s_e_info})")
                                                         else:
-                                                            st.markdown(f"- **{series_name}** (Detalhes não disponíveis)")
+                                                            series_list.append(f"- **{series_name}** (Detalhes não disponíveis)")
+                                                    st.markdown("\n".join(series_list))
                                                 else:
+                                                    # Já estava correto, mantido para consistência
                                                     matches_text = "\n".join([f"- {match}" for match in matches])
                                                     st.markdown(matches_text)
-                            st.markdown("---") 
+                            st.markdown("---")
 
 if st.session_state.m3u_input_value:
     st.session_state.form_submitted = True
