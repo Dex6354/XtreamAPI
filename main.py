@@ -4,6 +4,7 @@ import requests
 from urllib.parse import quote, urlparse
 from datetime import datetime
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Configuração da página do Streamlit
 st.set_page_config(page_title="Testar Xtream API", layout="centered")
@@ -74,57 +75,49 @@ def parse_urls(message):
                 })
     return parsed_urls
 
-def get_xtream_info(base, username, password):
+def get_xtream_info(parsed_url_data):
     """
-    Testa o login na API Xtream e, se bem-sucedido, busca contagem de mídias
-    e verifica a existência de conteúdo adulto.
+    Função wrapper para testar uma única URL. Retorna os dados originais e os resultados.
     """
+    base = parsed_url_data["base"]
+    username = parsed_url_data["username"]
+    password = parsed_url_data["password"]
+
     username_encoded = quote(username)
     password_encoded = quote(password)
     api_url = f"{base}/player_api.php?username={username_encoded}&password={password_encoded}"
     headers = {
         "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json"
+        "Accept": "application/json",
+        "Connection": "close" # Ajuda a evitar erros de conexão em massa
     }
     
-    # Dicionário de resultados padrão
     result = {
-        "is_json": False,
-        "real_server": base,
-        "exp_date": "Falha no login",
-        "active_cons": "N/A",
-        "max_connections": "N/A",
-        "has_adult_content": False,
-        "is_accepted_domain": False,
-        "live_count": 0,
-        "vod_count": 0,
-        "series_count": 0
+        "is_json": False, "real_server": base, "exp_date": "Falha no login",
+        "active_cons": "N/A", "max_connections": "N/A", "has_adult_content": False,
+        "is_accepted_domain": False, "live_count": 0, "vod_count": 0, "series_count": 0
     }
 
     try:
-        # 1. Teste de Login
         response = requests.get(api_url, headers=headers, timeout=10, allow_redirects=True)
         response.raise_for_status()
         json_data = response.json()
         
         if not json_data or "user_info" not in json_data:
-             return result
+             return parsed_url_data, result
 
         result["is_json"] = True
         user_info = json_data.get("user_info", {})
         server_info = json_data.get("server_info", {})
 
-        # Atualiza informações básicas
         real_server_url = server_info.get("url", base)
         if not real_server_url.startswith(("http://", "https://")):
             real_server_url = "http://" + real_server_url
         result["real_server"] = real_server_url.replace("https://", "http://").rstrip("/")
 
-        # Verifica se o domínio é aceito
         valid_tlds = ('.ca', '.io', '.cc', '.me', '.in')
         domain = urlparse(result["real_server"]).netloc
-        if any(domain.lower().endswith(tld) for tld in valid_tlds):
-            result["is_accepted_domain"] = True
+        result["is_accepted_domain"] = any(domain.lower().endswith(tld) for tld in valid_tlds)
 
         exp_date_ts = user_info.get("exp_date")
         if exp_date_ts and str(exp_date_ts).isdigit():
@@ -135,34 +128,38 @@ def get_xtream_info(base, username, password):
         result["active_cons"] = user_info.get("active_cons", "N/A")
         result["max_connections"] = user_info.get("max_connections", "N/A")
 
-        # Se o login funcionou, continue para as outras chamadas
         api_base_url = f"{result['real_server']}/player_api.php?username={username_encoded}&password={password_encoded}"
         adult_keywords = ["adulto", "adultos", "xxx", "+18"]
-
-        def make_api_request(action):
-            try:
-                r = requests.get(f"{api_base_url}&action={action}", headers=headers, timeout=15)
-                r.raise_for_status()
-                return r.json() if r.text else []
-            except (requests.exceptions.RequestException, ValueError):
-                return []
-
-        # 2. Verificação de Conteúdo Adulto
-        for action in ["get_live_categories", "get_vod_categories", "get_series_categories"]:
-            categories = make_api_request(action)
-            if categories and any(keyword in cat.get("category_name", "").lower() for cat in categories for keyword in adult_keywords):
-                result["has_adult_content"] = True
-                break
         
-        # 3. Contagem de Mídia
-        result["live_count"] = len(make_api_request("get_live_streams"))
-        result["vod_count"] = len(make_api_request("get_vod_streams"))
-        result["series_count"] = len(make_api_request("get_series"))
+        # Otimização: buscar todas as categorias em paralelo
+        with ThreadPoolExecutor(max_workers=3) as cat_executor:
+            actions = ["get_live_categories", "get_vod_categories", "get_series_categories"]
+            futures = {cat_executor.submit(lambda: requests.get(f"{api_base_url}&action={a}", headers=headers, timeout=15).json()): a for a in actions}
+            for future in as_completed(futures):
+                try:
+                    categories = future.result()
+                    if categories and any(keyword in cat.get("category_name", "").lower() for cat in categories for keyword in adult_keywords):
+                        result["has_adult_content"] = True
+                        break # Encontrou, pode parar de verificar
+                except:
+                    continue # Ignora falhas na busca de categorias
+        
+        # Otimização: buscar contagem de mídia em paralelo
+        with ThreadPoolExecutor(max_workers=3) as count_executor:
+            actions = {"live": "get_live_streams", "vod": "get_vod_streams", "series": "get_series"}
+            futures = {count_executor.submit(lambda: requests.get(f"{api_base_url}&action={a}", headers=headers, timeout=15).json()): k for k, a in actions.items()}
+            for future in as_completed(futures):
+                key = futures[future]
+                try:
+                    data = future.result()
+                    result[f"{key}_count"] = len(data) if data else 0
+                except:
+                    continue # Ignora falhas na contagem
 
-        return result
+        return parsed_url_data, result
 
     except (requests.exceptions.RequestException, ValueError):
-        return result
+        return parsed_url_data, result
 
 
 # Criação do formulário na interface
@@ -171,33 +168,34 @@ with st.form(key="m3u_form"):
 
     col1, col2 = st.columns([1,1])
     with col1:
-        submit_button = st.form_submit_button("🔍 Testar APIs")
+        submit_button = st.form_submit_button("🚀 Testar APIs (Rápido)")
     with col2:
         clear_button = st.form_submit_button("🧹 Limpar", on_click=clear_input)
 
-    # Lógica de processamento ao submeter o formulário
     if submit_button or st.session_state.get("form_submitted", False):
         if not m3u_message:
             st.warning("⚠️ Por favor, insira uma mensagem com URLs.")
         else:
-            with st.spinner("Analisando login, categorias e mídias... Isso pode levar um momento."):
+            with st.spinner("Analisando APIs em paralelo... Isso será rápido!"):
                 parsed_urls = parse_urls(m3u_message)
                 
                 if not parsed_urls:
                     st.warning("⚠️ Nenhuma URL válida encontrada na mensagem.")
                 else:
                     results = []
-                    
-                    for parsed in parsed_urls:
-                        api_result = get_xtream_info(parsed["base"], parsed["username"], parsed["password"])
-                        api_url = f"{parsed['base']}/player_api.php?username={quote(parsed['username'])}&password={quote(parsed['password'])}"
-                        
-                        results.append({
-                            "api_url": api_url,
-                            "username": parsed["username"],
-                            "password": parsed["password"],
-                            **api_result
-                        })
+                    # Usando ThreadPoolExecutor para processar URLs em paralelo
+                    with ThreadPoolExecutor(max_workers=10) as executor: # Aumente os workers se tiver muitas URLs
+                        future_to_url = {executor.submit(get_xtream_info, url_data): url_data for url_data in parsed_urls}
+                        for future in as_completed(future_to_url):
+                            original_data, api_result = future.result()
+                            api_url = f"{original_data['base']}/player_api.php?username={quote(original_data['username'])}&password={quote(original_data['password'])}"
+                            
+                            results.append({
+                                "api_url": api_url,
+                                "username": original_data["username"],
+                                "password": original_data["password"],
+                                **api_result
+                            })
 
                     results.sort(key=lambda item: item['is_json'], reverse=True)
 
@@ -226,15 +224,12 @@ with st.form(key="m3u_form"):
                                 - **Conexões:** `{result['active_cons']}` / `{result['max_connections']}`
                                 - **Domínio Aceito na TV:** {domain_emoji}
                                 - **Conteúdo Adulto:** {adult_emoji}
-                                
-                                **Mídia:**
-                                - `{result['live_count']}` Canais
-                                - `{result['vod_count']}` Filmes
-                                - `{result['series_count']}` Séries
+                                - **Canais:** `{result['live_count']}`
+                                - **Filmes:** `{result['vod_count']}`
+                                - **Séries:** `{result['series_count']}`
                                 """)
                             st.markdown("---") 
 
-# Mantém o formulário submetido se houver texto
 if st.session_state.m3u_input_value:
     st.session_state.form_submitted = True
 else:
