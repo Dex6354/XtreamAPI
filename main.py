@@ -28,8 +28,8 @@ st.markdown("""
 st.markdown("""
     <h5 style='margin-bottom: 0.1rem;'>🔌 Testar Xtream API</h5>
     <p style='margin-top: 0.1rem;'>
-        ✅ <strong>Funcionam no IPTV SmartersPro:</strong> Servidores terminados com <code>.ca</code>, <code>.io</code>, <code>.cc</code>, <code>.me</code>, <code>.in</code> e porta <code>80</code>.<br>
-        ❌ <strong>Não funcionam:</strong> Servidores terminados com <code>.site</code>, <code>.com</code>, <code>.lat</code>, <code>.live</code>, <code>.top</code>, <code>.icu</code>, <code>.xyz</code>, <code>.online</code>.
+        ✅ <strong>Domínios aceitos no Smarters Pro:</strong> <code>.ca</code>, <code>.io</code>, <code>.cc</code>, <code>.me</code>, <code>.in</code>.<br>
+        ❌ <strong>Domínios não aceitos:</strong> <code>.site</code>, <code>.com</code>, <code>.lat</code>, <code>.live</code>, <code>.top</code>, <code>.icu</code>, <code>.xyz</code>, <code>.online</code>.
     </p>
 """, unsafe_allow_html=True)
 
@@ -95,6 +95,7 @@ def get_xtream_info(base, username, password):
         "active_cons": "N/A",
         "max_connections": "N/A",
         "has_adult_content": False,
+        "is_accepted_domain": False,
         "live_count": 0,
         "vod_count": 0,
         "series_count": 0
@@ -114,10 +115,16 @@ def get_xtream_info(base, username, password):
         server_info = json_data.get("server_info", {})
 
         # Atualiza informações básicas
-        real_server = server_info.get("url", base)
-        if not real_server.startswith(("http://", "https://")):
-            real_server = "http://" + real_server
-        result["real_server"] = real_server.replace("https://", "http://").rstrip("/")
+        real_server_url = server_info.get("url", base)
+        if not real_server_url.startswith(("http://", "https://")):
+            real_server_url = "http://" + real_server_url
+        result["real_server"] = real_server_url.replace("https://", "http://").rstrip("/")
+
+        # Verifica se o domínio é aceito
+        valid_tlds = ('.ca', '.io', '.cc', '.me', '.in')
+        domain = urlparse(result["real_server"]).netloc
+        if any(domain.lower().endswith(tld) for tld in valid_tlds):
+            result["is_accepted_domain"] = True
 
         exp_date_ts = user_info.get("exp_date")
         if exp_date_ts and str(exp_date_ts).isdigit():
@@ -210,14 +217,20 @@ with st.form(key="m3u_form"):
 
                             with st.container(border=True):
                                 adult_emoji = "🔞 Contém" if result['has_adult_content'] else "✅ Não Contém"
+                                domain_emoji = "✅ Sim" if result['is_accepted_domain'] else "❌ Não"
                                 st.markdown(f"""
                                 - **Usuário:** `{result['username']}`
                                 - **Senha:** `{result['password']}`
                                 - **URL Real:** `{result['real_server']}`
                                 - **Expira em:** `{result['exp_date']}`
                                 - **Conexões:** `{result['active_cons']}` / `{result['max_connections']}`
+                                - **Domínio Aceito na TV:** {domain_emoji}
                                 - **Conteúdo Adulto:** {adult_emoji}
-                                - **Mídia:** `{result['live_count']}` Canais | `{result['vod_count']}` Filmes | `{result['series_count']}` Séries
+                                
+                                **Mídia:**
+                                - `{result['live_count']}` Canais
+                                - `{result['vod_count']}` Filmes
+                                - `{result['series_count']}` Séries
                                 """)
                             st.markdown("---") 
 
