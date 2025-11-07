@@ -30,8 +30,8 @@ st.markdown("""
 st.markdown("""
     <h5 style='margin-bottom: 0.1rem;'>🔌 Testar Xtream API</h5>
     <p style='margin-top: 0.1rem;'>
-        ✅ <strong>Domínios aceitos no Smarters Pro:</strong> <code>.ca</code>, <code>.io</code>, <code>.cc</code>, <code>.me</code>, <code>.in</code>.<br>
-        ❌ <strong>Domínios não aceitos:</strong> <code>.site</code>, <code>.com</code>, <code>.lat</code>, <code>.live</code>, <code>.top</code>, <code>.icu</code>, <code>.xyz</code>, <code>.online</code>.
+        ✅ <strong>Domínios aceitos no Smarters Pro:</strong> <code>.ca</code>, <code>.io</code>, <code>.cc</code>, <code>.me</code>, <code>.top</code>, <code>.space</code>, <code>.in</code>.<br>
+        ❌ <strong>Domínios não aceitos:</strong> <code>.site</code>, <code>.com</code>, <code>.lat</code>, <code>.live</code>, <code>.icu</code>, <code>.xyz</code>, <code>.online</code>.
     </p>
 """, unsafe_allow_html=True)
 
