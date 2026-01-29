@@ -7,186 +7,161 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import unicodedata
 
-# Configuração da página do Streamlit
-st.set_page_config(page_title="Testar Xtream API", layout="centered")
+# Configuração da página
+st.set_page_config(page_title="Xtream API Checker Pro", layout="centered")
 
-# Estilos CSS
 st.markdown("""
     <style>
         .block-container { padding-top: 2.5rem; }
         .stCodeBlock, code { white-space: pre-wrap !important; word-break: break-all !important; }
-        a { word-break: break-all !important; }
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown("""
-    <h5 style='margin-bottom: 0.1rem;'>🔌 Testar Xtream API</h5>
-    <p style='margin-top: 0.1rem;'>
-        ✅ <strong>Domínios aceitos no Smarters Pro:</strong> <code>.ca</code>, <code>.io</code>, <code>.cc</code>, <code>.me</code>, <code>.top</code>, <code>.space</code>, <code>.in</code>.<br>
-        ❌ <strong>Domínios não aceitos:</strong> <code>.site</code>, <code>.com</code>, <code>.lat</code>, <code>.live</code>, <code>.icu</code>, <code>.xyz</code>, <code>.online</code>.
-    </p>
-""", unsafe_allow_html=True)
+st.title("🔌 Xtream API Checker")
 
-if "m3u_input_value" not in st.session_state:
-    st.session_state.m3u_input_value = ""
-if "search_name" not in st.session_state:
-    st.session_state.search_name = ""
-
-def clear_input():
-    st.session_state.m3u_input_value = ""
-    st.session_state.search_name = ""
-    st.session_state.form_submitted = False
+# --- FUNÇÕES DE PARSE ---
 
 def normalize_text(text):
     if not isinstance(text, str): return ""
-    text = text.lower()
-    return unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
+    return unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8').lower()
 
-def parse_urls(message):
-    m3u_pattern = r"(https?://[^\s]+?get\.php\?username=([^\s&]+)&password=([^\s&]+))"
-    api_pattern = r"(https?://[^\s]+?player_api\.php\?username=([^\s&]+)&password=([^\s&]+))"
+def extract_credentials(text):
+    """Extrai credenciais tanto de URLs completas quanto de campos isolados."""
+    results = []
     
-    found = re.findall(m3u_pattern, message) + re.findall(api_pattern, message)
-    parsed_urls = []
-    unique_ids = set()
+    # 1. Tentar capturar URL completa (M3U ou Player API)
+    m3u_pattern = r"(https?://[^\s|]+)/get\.php\?username=([^\s&]+)&password=([^\s&]+)"
+    api_pattern = r"(https?://[^\s|]+)/player_api\.php\?username=([^\s&]+)&password=([^\s&]+)"
+    
+    found_urls = re.findall(m3u_pattern, text) + re.findall(api_pattern, text)
+    for base, user, pwd in found_urls:
+        results.append({"base": base, "username": user, "password": pwd})
 
-    for item in found:
-        full_url, user, pwd = item
-        base_match = re.search(r"(https?://[^/]+(?::\d+)?)", full_url)
-        if base_match:
-            base = base_match.group(1).replace("https://", "http://")
-            identifier = (base, user, pwd)
-            if identifier not in unique_ids:
-                unique_ids.add(identifier)
-                parsed_urls.append({"base": base, "username": user, "password": pwd})
-    return parsed_urls
-
-def get_series_details(base_url, username, password, series_id):
-    try:
-        url = f"{base_url}/player_api.php?username={quote(username)}&password={quote(password)}&action=get_series_info&series_id={series_id}"
-        resp = requests.get(url, timeout=10).json()
-        episodes = resp.get("episodes", {})
-        if not episodes: return None
+    # 2. Se não achou URL, ou para garantir, busca campos isolados (Host, User, Pass)
+    # Procura por padrões como "Host: http://..." ou "User: admin"
+    if not results:
+        hosts = re.findall(r"(?:Host|Real|http-port)\s*[:➩>]*\s*(https?://[^\s]+)", text, re.I)
+        users = re.findall(r"(?:User|Username|Usuário)\s*[:➩>]*\s*([a-zA-Z0-9._-]+)", text, re.I)
+        pwds = re.findall(r"(?:Pass|Password|Senha)\s*[:➩>]*\s*([a-zA-Z0-9._-]+)", text, re.I)
         
-        last_season_num = max(int(k) for k in episodes.keys() if k.isdigit())
-        last_episode = episodes[str(last_season_num)][-1]
-        title = last_episode.get("title", "")
-        match = re.search(r"S(\d+)E(\d+)", title, re.IGNORECASE)
-        return match.group(0).upper() if match else f"S{last_season_num:02d}E{len(episodes[str(last_season_num)]):02d}"
-    except: return None
+        if hosts and users and pwds:
+            # Pega o primeiro de cada categoria encontrado
+            base_url = hosts[0].split(':80')[0] if ':80' in hosts[0] else hosts[0]
+            # Remove barras finais
+            base_url = base_url.rstrip('/')
+            results.append({
+                "base": base_url,
+                "username": users[0],
+                "password": pwds[0]
+            })
 
-def get_xtream_info(url_data, search_name=None):
-    base, user, pwd = url_data["base"], url_data["username"], url_data["password"]
-    u_enc, p_enc = quote(user), quote(pwd)
-    api_url = f"{base}/player_api.php?username={u_enc}&password={p_enc}"
+    # Remover duplicatas mantendo ordem
+    unique_results = []
+    seen = set()
+    for item in results:
+        identifier = (item['base'], item['username'], item['password'])
+        if identifier not in seen:
+            seen.add(identifier)
+            unique_results.append(item)
+            
+    return unique_results
+
+# --- FUNÇÕES DE API ---
+
+def get_xtream_info(cred, search_query=None):
+    base = cred["base"]
+    u, p = cred["username"], cred["password"]
+    api_url = f"{base}/player_api.php?username={quote(u)}&password={quote(p)}"
     
-    res = {
-        "is_json": False, "real_server": base, "exp_date": "Falha no login",
-        "active_cons": "N/A", "max_connections": "N/A", "has_adult_content": False,
-        "is_accepted_domain": False, "live_count": 0, "vod_count": 0, "series_count": 0,
-        "search_matches": {"Canais": [], "Filmes": [], "Séries": {}}
+    data_res = {
+        "valid": False, "exp": "N/A", "active": "0", "max": "0",
+        "live": 0, "vod": 0, "series": 0, "matches": []
     }
 
     try:
-        main_resp = requests.get(api_url, timeout=12).json()
-        if "user_info" not in main_resp: return url_data, res
+        # 1. Login e Informações de Usuário
+        response = requests.get(api_url, timeout=10)
+        if response.status_code != 200: return cred, data_res
         
-        res["is_json"] = True
-        user_info = main_resp.get("user_info", {})
+        info = response.json()
+        u_info = info.get("user_info", {})
         
-        # Data de Expiração
-        exp = user_info.get("exp_date")
-        if exp and str(exp).isdigit():
-            res["exp_date"] = "Nunca expira" if int(exp) > time.time() * 2 else datetime.fromtimestamp(int(exp)).strftime('%d/%m/%Y')
-        
-        res["active_cons"] = user_info.get("active_cons", "0")
-        res["max_connections"] = user_info.get("max_connections", "0")
-        
-        # Validar Domínio
-        valid_tlds = ('.ca', '.io', '.cc', '.me', '.in', '.top', '.space')
-        domain = urlparse(base).netloc.lower()
-        res["is_accepted_domain"] = any(domain.endswith(tld) for tld in valid_tlds)
+        if u_info.get("auth") == 0 or "auth" not in u_info:
+            return cred, data_res # Falha na autenticação
 
-        # Threading para buscar contagens reais e busca
+        data_res["valid"] = True
+        
+        # Expiração
+        exp = u_info.get("exp_date")
+        if exp:
+            if exp == "null" or not str(exp).isdigit(): data_res["exp"] = "Ilimitado"
+            else: data_res["exp"] = datetime.fromtimestamp(int(exp)).strftime('%d/%m/%Y')
+
+        data_res["active"] = u_info.get("active_cons", "0")
+        data_res["max"] = u_info.get("max_connections", "0")
+
+        # 2. Contagem de Conteúdo (Paralelo)
         actions = {"live": "get_live_streams", "vod": "get_vod_streams", "series": "get_series"}
+        
         with ThreadPoolExecutor(max_workers=3) as executor:
-            future_to_key = {executor.submit(requests.get, f"{api_url}&action={act}", timeout=15): key for key, act in actions.items()}
-            
-            for future in as_completed(future_to_key):
-                key = future_to_key[future]
+            future_map = {executor.submit(requests.get, f"{api_url}&action={act}", timeout=12): key for key, act in actions.items()}
+            for future in as_completed(future_map):
+                key = future_map[future]
                 try:
-                    data = future.result().json()
-                    if isinstance(data, list):
-                        res[f"{key}_count"] = len(data)
+                    content = future.result().json()
+                    if isinstance(content, list):
+                        data_res[key] = len(content)
                         
-                        if search_name:
-                            s_norm = normalize_text(search_name)
-                            if key == "series":
-                                for item in data:
-                                    if s_norm in normalize_text(item.get("name")):
-                                        s_id = item.get("series_id")
-                                        s_info = get_series_details(base, user, pwd, s_id)
-                                        res["search_matches"]["Séries"][item.get("name")] = s_info or "Disponível"
-                            else:
-                                matches = [i.get("name") for i in data if s_norm in normalize_text(i.get("name"))]
-                                cat_name = "Canais" if key == "live" else "Filmes"
-                                res["search_matches"][cat_name].extend(matches)
+                        # Busca simples se houver query
+                        if search_query:
+                            s_norm = normalize_text(search_query)
+                            for item in content:
+                                name = item.get("name", "")
+                                if s_norm in normalize_text(name):
+                                    data_res["matches"].append(f"[{key.upper()}] {name}")
                 except: continue
 
-        # Checar Conteúdo Adulto via Categorias
-        cat_resp = requests.get(f"{api_url}&action=get_live_categories", timeout=10).json()
-        if any(x in normalize_text(str(cat_resp)) for x in ["adulto", "xxx", "+18", "porn"]):
-            res["has_adult_content"] = True
+    except Exception as e:
+        print(f"Erro: {e}")
+        
+    return cred, data_res
 
-    except: pass
-    return url_data, res
+# --- INTERFACE STREAMLIT ---
 
-# Interface
-with st.form(key="m3u_form"):
-    m3u_message = st.text_area("Cole as URLs aqui", key="m3u_input_value", height=150)
-    search_query = st.text_input("🔍 Buscar conteúdo específico (opcional)", key="search_name")
-    
-    c1, c2 = st.columns([1,1])
-    with c1: submit = st.form_submit_button("🚀 Testar Agora")
-    with c2: clear = st.form_submit_button("🧹 Limpar", on_click=clear_input)
+input_text = st.text_area("Cole os dados do painel ou a URL M3U:", height=200, placeholder="Pode colar o texto completo com Host, User e Pass...")
+search_input = st.text_input("🔍 Buscar filme, série ou canal (Opcional)")
 
-if submit and m3u_message:
-    parsed = parse_urls(m3u_message)
-    if not parsed:
-        st.error("Nenhuma URL válida encontrada.")
+if st.button("🚀 Validar e Contar Conteúdo"):
+    if not input_text:
+        st.warning("Por favor, cole algum dado para analisar.")
     else:
-        with st.spinner("Processando dados..."):
-            with ThreadPoolExecutor(max_workers=5) as executor:
-                futures = [executor.submit(get_xtream_info, url, search_query) for url in parsed]
-                for future in as_completed(futures):
-                    orig, info = future.result()
+        creds_found = extract_credentials(input_text)
+        
+        if not creds_found:
+            st.error("Não encontrei um padrão de Host, Usuário e Senha. Verifique o texto colado.")
+        else:
+            for cred in creds_found:
+                with st.spinner(f"Acessando {cred['base']}..."):
+                    c, res = get_xtream_info(cred, search_input)
                     
-                    status_icon = "✅" if info["is_json"] else "❌"
-                    color = "green" if info["is_json"] else "red"
-                    
-                    st.markdown(f"### {status_icon} Servidor: `{orig['base']}`")
-                    with st.container(border=True):
-                        col_a, col_b = st.columns(2)
-                        with col_a:
-                            st.write(f"👤 **Usuário:** `{orig['username']}`")
-                            st.write(f"🔑 **Senha:** `{orig['password']}`")
-                            st.write(f"📅 **Expira:** `{info['exp_date']}`")
-                            st.write(f"🌐 **Domínio OK:** {'✅' if info['is_accepted_domain'] else '❌'}")
-                        with col_b:
-                            st.write(f"📺 **Canais:** `{info['live_count']}`")
-                            st.write(f"🎬 **Filmes:** `{info['vod_count']}`")
-                            st.write(f"🍿 **Séries:** `{info['series_count']}`")
-                            st.write(f"👥 **Conexões:** `{info['active_cons']}/{info['max_connections']}`")
-
-                        if search_query and any(info["search_matches"].values()):
-                            st.info(f"🔎 Resultados para '{search_query}':")
-                            for cat, matches in info["search_matches"].items():
-                                if matches:
-                                    st.write(f"**{cat}:**")
-                                    if isinstance(matches, dict):
-                                        for n, v in matches.items(): st.write(f"- {n} ({v})")
-                                    else:
-                                        for m in matches[:10]: st.write(f"- {m}")
-                    st.divider()
-
-st.info("Dica: O sistema agora consulta cada categoria individualmente para garantir que o número de filmes e séries esteja 100% correto.")
+                    if not res["valid"]:
+                        st.error(f"❌ Falha no Login: {c['base']} (User: {c['username']})")
+                    else:
+                        st.success(f"✅ Conectado: {c['base']}")
+                        
+                        with st.container(border=True):
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.write(f"👤 **Usuário:** `{c['username']}`")
+                                st.write(f"🔑 **Senha:** `{c['password']}`")
+                                st.write(f"📅 **Expira em:** `{res['exp']}`")
+                            with col2:
+                                st.write(f"📺 **Canais:** `{res['live']}`")
+                                st.write(f"🎬 **Filmes:** `{res['vod']}`")
+                                st.write(f"🍿 **Séries:** `{res['series']}`")
+                                st.write(f"👥 **Conexões:** `{res['active']}/{res['max']}`")
+                            
+                            if res["matches"]:
+                                with st.expander("🔎 Resultados da Busca"):
+                                    for m in res["matches"][:15]: st.write(m)
+                                    if len(res["matches"]) > 15: st.write("...")
