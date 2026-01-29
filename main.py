@@ -6,6 +6,10 @@ from datetime import datetime
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import unicodedata
+import urllib3
+
+# Desativa avisos de SSL inseguro (comum em IPTV)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Configuração da página do Streamlit
 st.set_page_config(page_title="Testar Xtream API", layout="centered")
@@ -35,7 +39,7 @@ st.markdown("""
     </p>
 """, unsafe_allow_html=True)
 
-# Inicializa o estado da sessão para o campo de texto e pesquisa
+# Inicializa o estado da sessão
 if "m3u_input_value" not in st.session_state:
     st.session_state.m3u_input_value = ""
 
@@ -58,8 +62,10 @@ def normalize_text(text):
 
 def parse_urls(message):
     """Extrai URLs M3U e Player API da mensagem de texto, evitando duplicatas."""
-    m3u_pattern = r"(https?://[^\s]+?get\.php\?username=[^\s&]+&password=[^\s&]+&type=m3u_plus(?:&output=[^\s]+)?)"
-    api_pattern = r"(https?://[^\s]+?player_api\.php\?username=[^\s&]+&password=[^\s&]+)"
+    # Regex ajustada para capturar melhor portas e evitar quebras com emojis
+    m3u_pattern = r"(https?://[a-zA-Z0-9.-]+(?::\d+)?/[^\s]*?get\.php\?username=[^\s&]+&password=[^\s&]+&type=m3u_plus(?:&output=[^\s]+)?)"
+    api_pattern = r"(https?://[a-zA-Z0-9.-]+(?::\d+)?/[^\s]*?player_api\.php\?username=[^\s&]+&password=[^\s&]+)"
+    
     urls = re.findall(m3u_pattern, message) + re.findall(api_pattern, message)
 
     parsed_urls = []
@@ -68,12 +74,13 @@ def parse_urls(message):
     for url in urls:
         current_url = url[0] if isinstance(url, tuple) else url
 
+        # Extrai a base (protocolo + dominio + porta)
         base_match = re.search(r"(https?://[^/]+(?::\d+)?)", current_url)
         user_match = re.search(r"username=([^&]+)", current_url)
         pwd_match = re.search(r"password=([^&]+)", current_url)
 
         if base_match and user_match and pwd_match:
-            base = base_match.group(1).replace("https://", "http://")
+            base = base_match.group(1).replace("https://", "http://") # Força HTTP se necessário, mas mantém a porta
             username = user_match.group(1)
             password = pwd_match.group(1)
 
@@ -89,13 +96,15 @@ def parse_urls(message):
     return parsed_urls
 
 def get_series_details(base_url, username, password, series_id):
-    """
-    Busca informações detalhadas de uma série, incluindo o número de temporadas
-    e o último episódio.
-    """
+    """Busca informações detalhadas de uma série."""
     try:
+        # Headers simulando Player
+        headers = {
+            "User-Agent": "IPTVSmartersPro",
+            "Connection": "keep-alive"
+        }
         series_info_url = f"{base_url}/player_api.php?username={quote(username)}&password={quote(password)}&action=get_series_info&series_id={series_id}"
-        response = requests.get(series_info_url, timeout=10)
+        response = requests.get(series_info_url, headers=headers, timeout=10, verify=False)
         response.raise_for_status()
         series_data = response.json()
 
@@ -106,8 +115,12 @@ def get_series_details(base_url, username, password, series_id):
 
         # Encontra a última temporada
         latest_season_number = max(
-            int(season_num) for season_num in episodes_by_season.keys() if season_num.isdigit()
+            (int(season_num) for season_num in episodes_by_season.keys() if season_num.isdigit()),
+            default=0
         )
+        if latest_season_number == 0 and not episodes_by_season:
+             return None
+
         latest_season = episodes_by_season.get(str(latest_season_number), [])
 
         # Encontra o último episódio da última temporada
@@ -138,24 +151,34 @@ def get_xtream_info(parsed_url_data, search_name=None):
 
     username_encoded = quote(username)
     password_encoded = quote(password)
-    api_url = f"{base}/player_api.php?username={username_encoded}&password={password_encoded}"
+    
+    # URL base para chamadas
+    api_base_url_template = f"{base}/player_api.php?username={username_encoded}&password={password_encoded}"
+    
+    # IMPORTANTE: User-Agent modificado para evitar bloqueios que retornam 0 ou 404
     headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json",
-        "Connection": "close"
+        "User-Agent": "IPTVSmartersPro", 
+        "Accept": "*/*",
+        "Connection": "keep-alive"
     }
 
     result = {
         "is_json": False, "real_server": base, "exp_date": "Falha no login",
         "active_cons": "N/A", "max_connections": "N/A", "has_adult_content": False,
         "is_accepted_domain": False, "live_count": 0, "vod_count": 0, "series_count": 0,
-        "search_matches": {} # Alterado para um dicionário para armazenar por categoria
+        "search_matches": {} 
     }
 
     try:
-        response = requests.get(api_url, headers=headers, timeout=10, allow_redirects=True)
+        # 1. Tenta Login Inicial
+        response = requests.get(api_base_url_template, headers=headers, timeout=15, allow_redirects=True, verify=False)
         response.raise_for_status()
-        json_data = response.json()
+        
+        try:
+            json_data = response.json()
+        except ValueError:
+             # Se não for JSON, servidor inválido ou bloqueado
+             return parsed_url_data, result
 
         if not json_data or "user_info" not in json_data:
              return parsed_url_data, result
@@ -164,10 +187,15 @@ def get_xtream_info(parsed_url_data, search_name=None):
         user_info = json_data.get("user_info", {})
         server_info = json_data.get("server_info", {})
 
+        # Correção da URL real do servidor
         real_server_url = server_info.get("url", base)
-        if not real_server_url.startswith(("http://", "https://")):
-            real_server_url = "http://" + real_server_url
-        result["real_server"] = real_server_url.replace("https://", "http://").rstrip("/")
+        if real_server_url:
+            if not real_server_url.startswith(("http://", "https://")):
+                real_server_url = "http://" + real_server_url
+            result["real_server"] = real_server_url.replace("https://", "http://").rstrip("/")
+        
+        # Se a URL real mudou, atualiza a URL base para as próximas chamadas
+        api_base_url = f"{result['real_server']}/player_api.php?username={username_encoded}&password={password_encoded}"
 
         valid_tlds = ('.ca', '.io', '.cc', '.me', '.in')
         domain = urlparse(result["real_server"]).netloc
@@ -175,51 +203,77 @@ def get_xtream_info(parsed_url_data, search_name=None):
 
         exp_date_ts = user_info.get("exp_date")
         if exp_date_ts and str(exp_date_ts).isdigit():
-            result["exp_date"] = "Nunca expira" if int(exp_date_ts) > time.time() * 2 else datetime.fromtimestamp(int(exp_date_ts)).strftime('%d/%m/%Y')
+            # Verifica se é timestamp ou null
+            result["exp_date"] = "Nunca expira" if int(exp_date_ts) > 9999999999 or user_info.get("status") == "Active" and not exp_date_ts else datetime.fromtimestamp(int(exp_date_ts)).strftime('%d/%m/%Y')
+            if int(exp_date_ts) > time.time() * 2: # Caso timestamp seja muito grande
+                 result["exp_date"] = "Nunca expira"
         else:
-            result["exp_date"] = "N/A"
+            result["exp_date"] = "Ilimitado" if user_info.get("status") == "Active" else "N/A"
 
-        result["active_cons"] = user_info.get("active_cons", "N/A")
-        result["max_connections"] = user_info.get("max_connections", "N/A")
+        result["active_cons"] = user_info.get("active_cons", "0")
+        result["max_connections"] = user_info.get("max_connections", "0")
 
-        api_base_url = f"{result['real_server']}/player_api.php?username={username_encoded}&password={password_encoded}"
-        adult_keywords = ["adulto", "adultos", "xxx", "+18"]
-
+        # 2. Verifica Conteúdo Adulto (Rápido)
+        adult_keywords = ["adulto", "adultos", "xxx", "+18", "sexo", "porn"]
         with ThreadPoolExecutor(max_workers=3) as cat_executor:
             actions = ["get_live_categories", "get_vod_categories", "get_series_categories"]
-            futures = {cat_executor.submit(lambda: requests.get(f"{api_base_url}&action={a}", headers=headers, timeout=15).json()): a for a in actions}
+            # Timeout curto aqui pois é apenas checagem
+            futures = {cat_executor.submit(lambda: requests.get(f"{api_base_url}&action={a}", headers=headers, timeout=10, verify=False).json()): a for a in actions}
             for future in as_completed(futures):
                 try:
                     categories = future.result()
-                    if categories and any(keyword in normalize_text(cat.get("category_name", "")) for cat in categories for keyword in adult_keywords):
-                        result["has_adult_content"] = True
-                        break
+                    # Verifica se retornou lista
+                    if isinstance(categories, list):
+                        if any(keyword in normalize_text(cat.get("category_name", "")) for cat in categories for keyword in adult_keywords):
+                            result["has_adult_content"] = True
+                            break
                 except:
                     continue
 
+        # 3. Conta Streams e Faz Busca (Pesado)
         with ThreadPoolExecutor(max_workers=3) as count_executor:
+            # Aumentei timeout para 25s pois "get_all" pode ser demorado
             actions = {"live": "get_live_streams", "vod": "get_vod_streams", "series": "get_series"}
-            futures = {count_executor.submit(lambda: requests.get(f"{api_base_url}&action={a}", headers=headers, timeout=15).json()): k for k, a in actions.items()}
+            futures = {count_executor.submit(lambda url=f"{api_base_url}&action={a}": requests.get(url, headers=headers, timeout=25, verify=False).json()): k for k, a in actions.items()}
 
             if search_name:
                 normalized_search = normalize_text(search_name)
-                result["search_matches"] = {"Canais": [], "Filmes": [], "Séries": {}} # Inicializa as listas de cada categoria
+                result["search_matches"] = {"Canais": [], "Filmes": [], "Séries": {}}
 
             for future in as_completed(futures):
                 key = futures[future]
                 try:
                     data = future.result()
-                    result[f"{key}_count"] = len(data) if data else 0
-                    if search_name and data:
+                    
+                    # Verificação robusta se os dados são válidos
+                    count = 0
+                    valid_data = []
+
+                    if isinstance(data, list):
+                        count = len(data)
+                        valid_data = data
+                    elif isinstance(data, dict):
+                        # Algumas APIs retornam dict com indices ou objeto de erro
+                        if "user_info" in data: # Significa que a action falhou e retornou login info
+                            count = 0
+                        else:
+                            count = len(data)
+                            valid_data = data.values() # Converte valores do dict para lista iterável
+                    
+                    result[f"{key}_count"] = count
+
+                    # Lógica de Busca
+                    if search_name and count > 0:
                         if key == "series":
                             # Processamento especial para séries
                             series_matches = [
-                                item for item in data if normalized_search in normalize_text(item.get("name", ""))
+                                item for item in valid_data 
+                                if isinstance(item, dict) and normalized_search in normalize_text(item.get("name", ""))
                             ]
                             for series in series_matches:
                                 series_id = series.get("series_id")
                                 series_name = series.get("name")
-                                # Aqui a nova função é chamada
+                                
                                 s_e = get_series_details(result['real_server'], username, password, series_id)
 
                                 if s_e:
@@ -227,13 +281,18 @@ def get_xtream_info(parsed_url_data, search_name=None):
                                 else:
                                     result["search_matches"]["Séries"][series_name] = "N/A"
                         else:
-                            matches = [item["name"] for item in data if normalized_search in normalize_text(item.get("name", ""))]
+                            matches = [
+                                item.get("name") for item in valid_data 
+                                if isinstance(item, dict) and normalized_search in normalize_text(item.get("name", ""))
+                            ]
                             if matches:
                                 if key == "live":
                                     result["search_matches"]["Canais"].extend(matches)
                                 elif key == "vod":
                                     result["search_matches"]["Filmes"].extend(matches)
-                except:
+                except Exception as e:
+                    # Se der erro no request ou parse, assume 0
+                    result[f"{key}_count"] = 0
                     continue
 
         return parsed_url_data, result
@@ -257,7 +316,7 @@ with st.form(key="m3u_form"):
         if not m3u_message:
             st.warning("⚠️ Por favor, insira uma mensagem com URLs.")
         else:
-            with st.spinner("Analisando APIs em paralelo... Isso será rápido!"):
+            with st.spinner("Analisando APIs em paralelo... Isso pode levar alguns segundos."):
                 parsed_urls = parse_urls(m3u_message)
 
                 if not parsed_urls:
@@ -268,10 +327,12 @@ with st.form(key="m3u_form"):
                         future_to_url = {executor.submit(get_xtream_info, url_data, search_name): url_data for url_data in parsed_urls}
                         for future in as_completed(future_to_url):
                             original_data, api_result = future.result()
-                            api_url = f"{original_data['base']}/player_api.php?username={quote(original_data['username'])}&password={quote(original_data['password'])}"
+                            
+                            # Reconstrói a URL para exibição
+                            api_url_display = f"{original_data['base']}/player_api.php?username={original_data['username']}&password={original_data['password']}"
 
                             results.append({
-                                "api_url": api_url,
+                                "api_url": api_url_display,
                                 "username": original_data["username"],
                                 "password": original_data["password"],
                                 **api_result
@@ -315,7 +376,6 @@ with st.form(key="m3u_form"):
                                         for category, matches in result["search_matches"].items():
                                             if matches:
                                                 st.markdown(f"**{category}:**")
-                                                # Cria uma lista de strings formatadas e une com quebras de linha
                                                 if category == "Séries":
                                                     series_list = []
                                                     for series_name, s_e_info in matches.items():
@@ -325,7 +385,6 @@ with st.form(key="m3u_form"):
                                                             series_list.append(f"- **{series_name}** (Detalhes não disponíveis)")
                                                     st.markdown("\n".join(series_list))
                                                 else:
-                                                    # Já estava correto, mantido para consistência
                                                     matches_text = "\n".join([f"- {match}" for match in matches])
                                                     st.markdown(matches_text)
                             st.markdown("---")
