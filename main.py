@@ -7,389 +7,289 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import unicodedata
 import urllib3
+import json
 
-# Desativa avisos de SSL inseguro (comum em IPTV)
+# Desativa avisos de SSL (necessário para servidores http/https com certificado inválido)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Configuração da página do Streamlit
-st.set_page_config(page_title="Testar Xtream API", layout="centered")
+# Configuração da página
+st.set_page_config(page_title="Xtream API Checker Pro", layout="centered")
 
-# Estilos CSS para ajustar o layout e o comportamento de quebra de linha
+# CSS Otimizado
 st.markdown("""
     <style>
-        .block-container {
-            padding-top: 2.5rem;
-        }
-        .stCodeBlock, code {
-            white-space: pre-wrap !important;
-            word-break: break-all !important;
-        }
-        a {
-            word-break: break-all !important;
-        }
+        .block-container { padding-top: 2rem; }
+        .stCodeBlock, code { white-space: pre-wrap !important; word-break: break-all !important; }
+        .success-box { padding: 10px; border-radius: 5px; background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .error-box { padding: 10px; border-radius: 5px; background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
     </style>
 """, unsafe_allow_html=True)
 
-# Título e descrição da página
-st.markdown("""
-    <h5 style='margin-bottom: 0.1rem;'>🔌 Testar Xtream API</h5>
-    <p style='margin-top: 0.1rem;'>
-        ✅ <strong>Domínios aceitos no Smarters Pro:</strong> <code>.ca</code>, <code>.io</code>, <code>.cc</code>, <code>.me</code>, <code>.top</code>, <code>.space</code>, <code>.in</code>.<br>
-        ❌ <strong>Domínios não aceitos:</strong> <code>.site</code>, <code>.com</code>, <code>.lat</code>, <code>.live</code>, <code>.icu</code>, <code>.xyz</code>, <code>.online</code>.
-    </p>
-""", unsafe_allow_html=True)
+st.title("🔌 Xtream API Checker (Anti-Bloqueio)")
+st.info("ℹ️ Se retornar '0 canais' mas mostrar categorias, o servidor bloqueia o download da lista completa (mas funciona no App).")
 
-# Inicializa o estado da sessão
-if "m3u_input_value" not in st.session_state:
-    st.session_state.m3u_input_value = ""
-
-if "search_name" not in st.session_state:
-    st.session_state.search_name = ""
+# Estado da Sessão
+if "m3u_input_value" not in st.session_state: st.session_state.m3u_input_value = ""
+if "search_name" not in st.session_state: st.session_state.search_name = ""
 
 def clear_input():
-    """Limpa o campo de texto e re-define o estado do formulário."""
     st.session_state.m3u_input_value = ""
     st.session_state.search_name = ""
     st.session_state.form_submitted = False
 
 def normalize_text(text):
-    """Normaliza o texto, removendo acentos, cedilha e convertendo para minúsculas."""
-    if not isinstance(text, str):
-        return ""
-    text = text.lower()
-    normalized = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
-    return normalized
+    if not isinstance(text, str): return ""
+    return unicodedata.normalize('NFKD', text.lower()).encode('ascii', 'ignore').decode('utf-8')
 
 def parse_urls(message):
-    """Extrai URLs M3U e Player API da mensagem de texto, evitando duplicatas."""
-    # Regex ajustada para capturar melhor portas e evitar quebras com emojis
-    m3u_pattern = r"(https?://[a-zA-Z0-9.-]+(?::\d+)?/[^\s]*?get\.php\?username=[^\s&]+&password=[^\s&]+&type=m3u_plus(?:&output=[^\s]+)?)"
-    api_pattern = r"(https?://[a-zA-Z0-9.-]+(?::\d+)?/[^\s]*?player_api\.php\?username=[^\s&]+&password=[^\s&]+)"
+    # Regex robusta para capturar http/https, portas e credenciais
+    pattern = r"(https?://[a-zA-Z0-9.-]+(?::\d+)?/[^\s]*?(?:get|player_api)\.php\?username=([^\s&]+)&password=([^\s&]+))"
+    matches = re.findall(pattern, message)
     
-    urls = re.findall(m3u_pattern, message) + re.findall(api_pattern, message)
-
-    parsed_urls = []
-    unique_urls = set()
-
-    for url in urls:
-        current_url = url[0] if isinstance(url, tuple) else url
-
-        # Extrai a base (protocolo + dominio + porta)
-        base_match = re.search(r"(https?://[^/]+(?::\d+)?)", current_url)
-        user_match = re.search(r"username=([^&]+)", current_url)
-        pwd_match = re.search(r"password=([^&]+)", current_url)
-
-        if base_match and user_match and pwd_match:
-            base = base_match.group(1).replace("https://", "http://") # Força HTTP se necessário, mas mantém a porta
-            username = user_match.group(1)
-            password = pwd_match.group(1)
-
-            identifier = (base, username, password)
-            if identifier not in unique_urls:
-                unique_urls.add(identifier)
-                parsed_urls.append({
-                    "url": current_url,
-                    "base": base,
-                    "username": username,
-                    "password": password
-                })
-    return parsed_urls
-
-def get_series_details(base_url, username, password, series_id):
-    """Busca informações detalhadas de uma série."""
-    try:
-        # Headers simulando Player
-        headers = {
-            "User-Agent": "IPTVSmartersPro",
-            "Connection": "keep-alive"
-        }
-        series_info_url = f"{base_url}/player_api.php?username={quote(username)}&password={quote(password)}&action=get_series_info&series_id={series_id}"
-        response = requests.get(series_info_url, headers=headers, timeout=10, verify=False)
-        response.raise_for_status()
-        series_data = response.json()
-
-        if not series_data or "episodes" not in series_data:
-            return None
-
-        episodes_by_season = series_data.get("episodes", {})
-
-        # Encontra a última temporada
-        latest_season_number = max(
-            (int(season_num) for season_num in episodes_by_season.keys() if season_num.isdigit()),
-            default=0
-        )
-        if latest_season_number == 0 and not episodes_by_season:
-             return None
-
-        latest_season = episodes_by_season.get(str(latest_season_number), [])
-
-        # Encontra o último episódio da última temporada
-        if latest_season:
-            latest_episode = latest_season[-1]
-            title = latest_episode.get("title", "")
-
-            # Tenta extrair SXXEXX com regex
-            match = re.search(r"S(\d+)E(\d+)", title, re.IGNORECASE)
-            if match:
-                s_e_string = match.group(0).upper()
-            else:
-                s_e_string = f"S{latest_season_number:02d}E{len(latest_season):02d}"
-
-            return s_e_string
-
-    except (requests.exceptions.RequestException, ValueError, KeyError):
-        return None
-    return None
-
-def get_xtream_info(parsed_url_data, search_name=None):
-    """
-    Função wrapper para testar uma única URL. Retorna os dados originais e os resultados.
-    """
-    base = parsed_url_data["base"]
-    username = parsed_url_data["username"]
-    password = parsed_url_data["password"]
-
-    username_encoded = quote(username)
-    password_encoded = quote(password)
+    unique_data = {}
+    for url, user, pwd in matches:
+        base_match = re.search(r"(https?://[^/]+(?::\d+)?)", url)
+        if base_match:
+            base = base_match.group(1).replace("https://", "http://") # Força HTTP para evitar erros de handshake SSL em alguns painéis
+            key = (base, user, pwd)
+            if key not in unique_data:
+                unique_data[key] = {"base": base, "username": user, "password": pwd}
     
-    # URL base para chamadas
-    api_base_url_template = f"{base}/player_api.php?username={username_encoded}&password={password_encoded}"
-    
-    # IMPORTANTE: User-Agent modificado para evitar bloqueios que retornam 0 ou 404
+    return list(unique_data.values())
+
+def fetch_data(session, url, retries=2):
+    """Função auxiliar com retry e headers específicos de Android"""
     headers = {
-        "User-Agent": "IPTVSmartersPro", 
+        "User-Agent": "okhttp/3.12.1", # Simula App Android Nativo
         "Accept": "*/*",
         "Connection": "keep-alive"
     }
+    for i in range(retries):
+        try:
+            r = session.get(url, headers=headers, timeout=20, verify=False)
+            r.raise_for_status()
+            try:
+                return r.json(), r.text
+            except ValueError:
+                return None, r.text # Retorna texto se não for JSON
+        except Exception:
+            if i == retries - 1: return None, None
+            time.sleep(1)
+    return None, None
 
+def check_content_availability(session, base_url, type_key):
+    """
+    Tenta pegar streams. Se falhar ou vier vazio, tenta pegar categorias.
+    type_key: 'live', 'vod', 'series'
+    """
+    action_streams = f"get_{type_key}_streams" if type_key != "series" else "get_series"
+    action_categories = f"get_{type_key}_categories"
+    
+    # 1. Tenta pegar lista completa
+    data, raw = fetch_data(session, f"{base_url}&action={action_streams}")
+    
+    count = 0
+    sample_data = []
+    method = "Full List"
+    
+    if isinstance(data, list):
+        count = len(data)
+        sample_data = data
+    elif isinstance(data, dict):
+        # Alguns painéis retornam dict na lista de streams se houver erro
+        count = 0 
+    
+    # 2. Se retornou 0, tenta pegar Categorias (Fallback)
+    if count == 0:
+        cat_data, _ = fetch_data(session, f"{base_url}&action={action_categories}")
+        if isinstance(cat_data, list) and len(cat_data) > 0:
+            count = len(cat_data)
+            method = "Categories Only" # Indica que só conseguimos ler categorias
+            
+    return count, method, sample_data
+
+def get_series_season_info(session, base_url, series_id):
+    """Pega detalhes da série se possível"""
+    url = f"{base_url}&action=get_series_info&series_id={series_id}"
+    data, _ = fetch_data(session, url)
+    if data and "episodes" in data:
+        seasons = [k for k in data["episodes"].keys() if k.isdigit()]
+        if seasons:
+            last_season = max(map(int, seasons))
+            eps = data["episodes"][str(last_season)]
+            return f"S{last_season:02d}E{len(eps):02d}"
+    return "Info N/A"
+
+def process_api(data, search_query):
+    session = requests.Session()
+    base_auth = f"{data['base']}/player_api.php?username={data['username']}&password={data['password']}"
+    
+    # 1. Login e Info do Usuário
+    login_data, raw_login = fetch_data(session, base_auth)
+    
     result = {
-        "is_json": False, "real_server": base, "exp_date": "Falha no login",
-        "active_cons": "N/A", "max_connections": "N/A", "has_adult_content": False,
-        "is_accepted_domain": False, "live_count": 0, "vod_count": 0, "series_count": 0,
-        "search_matches": {} 
+        "url_display": base_auth,
+        "base": data['base'],
+        "user": data['username'],
+        "pass": data['password'],
+        "status": "Falha",
+        "exp": "N/A",
+        "con": "N/A",
+        "live": 0, "live_method": "",
+        "vod": 0, "vod_method": "",
+        "series": 0, "series_method": "",
+        "matches": {"Canais": [], "Filmes": [], "Séries": []},
+        "raw_debug": raw_login
     }
 
-    try:
-        # 1. Tenta Login Inicial
-        response = requests.get(api_base_url_template, headers=headers, timeout=15, allow_redirects=True, verify=False)
-        response.raise_for_status()
-        
+    if not login_data or "user_info" not in login_data:
+        return result
+
+    result["status"] = "Ativo"
+    u_info = login_data.get("user_info", {})
+    s_info = login_data.get("server_info", {})
+    
+    # Processa Data de Expiração
+    exp = u_info.get("exp_date")
+    if exp:
         try:
-            json_data = response.json()
-        except ValueError:
-             # Se não for JSON, servidor inválido ou bloqueado
-             return parsed_url_data, result
+            ts = int(exp)
+            result["exp"] = "Nunca" if ts > 9999999999 else datetime.fromtimestamp(ts).strftime('%d/%m/%Y')
+        except: result["exp"] = "Erro data"
+    
+    result["con"] = f"{u_info.get('active_cons', 0)} / {u_info.get('max_connections', 0)}"
+    
+    # Atualiza URL real se houver redirecionamento no server info
+    real_url = s_info.get("url")
+    if real_url:
+        real_url_clean = real_url.replace("https://", "http://") # Normaliza protocolo
+        if not real_url_clean.startswith("http"): real_url_clean = "http://" + real_url_clean
+        if ":" in data['base'] and ":" not in real_url_clean: # Mantem porta se original tinha e novo nao
+             pass 
+        else:
+             # Atualiza base para as requisições de conteúdo
+             base_auth = f"{real_url_clean}/player_api.php?username={data['username']}&password={data['password']}"
 
-        if not json_data or "user_info" not in json_data:
-             return parsed_url_data, result
-
-        result["is_json"] = True
-        user_info = json_data.get("user_info", {})
-        server_info = json_data.get("server_info", {})
-
-        # Correção da URL real do servidor
-        real_server_url = server_info.get("url", base)
-        if real_server_url:
-            if not real_server_url.startswith(("http://", "https://")):
-                real_server_url = "http://" + real_server_url
-            result["real_server"] = real_server_url.replace("https://", "http://").rstrip("/")
+    # 2. Busca Conteúdo em Paralelo
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        f_live = executor.submit(check_content_availability, session, base_auth, "live")
+        f_vod = executor.submit(check_content_availability, session, base_auth, "vod")
+        f_series = executor.submit(check_content_availability, session, base_auth, "series")
         
-        # Se a URL real mudou, atualiza a URL base para as próximas chamadas
-        api_base_url = f"{result['real_server']}/player_api.php?username={username_encoded}&password={password_encoded}"
+        # Resultados Live
+        l_count, l_method, l_data = f_live.result()
+        result["live"] = l_count
+        result["live_method"] = l_method
+        
+        # Resultados VOD
+        v_count, v_method, v_data = f_vod.result()
+        result["vod"] = v_count
+        result["vod_method"] = v_method
+        
+        # Resultados Series
+        s_count, s_method, s_data = f_series.result()
+        result["series"] = s_count
+        result["series_method"] = s_method
+        
+        # 3. Busca (Search) - Só funciona se method == 'Full List'
+        if search_query:
+            norm_q = normalize_text(search_query)
+            
+            # Busca Canais
+            if l_method == "Full List":
+                result["matches"]["Canais"] = [x["name"] for x in l_data if norm_q in normalize_text(x.get("name", ""))]
+            
+            # Busca Filmes
+            if v_method == "Full List":
+                result["matches"]["Filmes"] = [x["name"] for x in v_data if norm_q in normalize_text(x.get("name", ""))]
+                
+            # Busca Séries (Mais complexo)
+            if s_method == "Full List":
+                found_series = [x for x in s_data if norm_q in normalize_text(x.get("name", ""))]
+                for s in found_series:
+                    info = get_series_season_info(session, base_auth, s["series_id"])
+                    result["matches"]["Séries"].append(f"{s['name']} ({info})")
 
-        valid_tlds = ('.ca', '.io', '.cc', '.me', '.in')
-        domain = urlparse(result["real_server"]).netloc
-        result["is_accepted_domain"] = any(domain.lower().endswith(tld) for tld in valid_tlds)
+    return result
 
-        exp_date_ts = user_info.get("exp_date")
-        if exp_date_ts and str(exp_date_ts).isdigit():
-            # Verifica se é timestamp ou null
-            result["exp_date"] = "Nunca expira" if int(exp_date_ts) > 9999999999 or user_info.get("status") == "Active" and not exp_date_ts else datetime.fromtimestamp(int(exp_date_ts)).strftime('%d/%m/%Y')
-            if int(exp_date_ts) > time.time() * 2: # Caso timestamp seja muito grande
-                 result["exp_date"] = "Nunca expira"
-        else:
-            result["exp_date"] = "Ilimitado" if user_info.get("status") == "Active" else "N/A"
+# --- Interface ---
 
-        result["active_cons"] = user_info.get("active_cons", "0")
-        result["max_connections"] = user_info.get("max_connections", "0")
+with st.form("checker_form"):
+    text_input = st.text_area("Cole os dados ou URL:", key="m3u_input_value", height=150)
+    search_input = st.text_input("Buscar (Opcional):", key="search_name")
+    
+    c1, c2 = st.columns([1, 4])
+    submitted = c1.form_submit_button("🚀 Verificar")
+    cleaned = c2.form_submit_button("🧹 Limpar", on_click=clear_input)
 
-        # 2. Verifica Conteúdo Adulto (Rápido)
-        adult_keywords = ["adulto", "adultos", "xxx", "+18", "sexo", "porn"]
-        with ThreadPoolExecutor(max_workers=3) as cat_executor:
-            actions = ["get_live_categories", "get_vod_categories", "get_series_categories"]
-            # Timeout curto aqui pois é apenas checagem
-            futures = {cat_executor.submit(lambda: requests.get(f"{api_base_url}&action={a}", headers=headers, timeout=10, verify=False).json()): a for a in actions}
-            for future in as_completed(futures):
-                try:
-                    categories = future.result()
-                    # Verifica se retornou lista
-                    if isinstance(categories, list):
-                        if any(keyword in normalize_text(cat.get("category_name", "")) for cat in categories for keyword in adult_keywords):
-                            result["has_adult_content"] = True
-                            break
-                except:
-                    continue
-
-        # 3. Conta Streams e Faz Busca (Pesado)
-        with ThreadPoolExecutor(max_workers=3) as count_executor:
-            # Aumentei timeout para 25s pois "get_all" pode ser demorado
-            actions = {"live": "get_live_streams", "vod": "get_vod_streams", "series": "get_series"}
-            futures = {count_executor.submit(lambda url=f"{api_base_url}&action={a}": requests.get(url, headers=headers, timeout=25, verify=False).json()): k for k, a in actions.items()}
-
-            if search_name:
-                normalized_search = normalize_text(search_name)
-                result["search_matches"] = {"Canais": [], "Filmes": [], "Séries": {}}
-
-            for future in as_completed(futures):
-                key = futures[future]
-                try:
-                    data = future.result()
+if submitted and text_input:
+    targets = parse_urls(text_input)
+    
+    if not targets:
+        st.error("❌ Nenhuma URL ou credencial encontrada.")
+    else:
+        with st.status("🔍 Conectando aos servidores...", expanded=True) as status:
+            results = []
+            for target in targets:
+                st.write(f"Testando: {target['base']}...")
+                res = process_api(target, search_input)
+                results.append(res)
+            status.update(label="Concluído!", state="complete", expanded=False)
+        
+        st.divider()
+        
+        for r in results:
+            # Cabeçalho do Card
+            icon = "✅" if r["status"] == "Ativo" else "❌"
+            st.markdown(f"### {icon} Servidor: `{r['base']}`")
+            
+            if r["status"] == "Ativo":
+                with st.container():
+                    # Info Básica
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Vencimento", r["exp"])
+                    c2.metric("Conexões", r["con"])
                     
-                    # Verificação robusta se os dados são válidos
-                    count = 0
-                    valid_data = []
+                    # Logica de exibição dos contadores
+                    def format_count(count, method):
+                        if count == 0: return "0"
+                        if method == "Categories Only": return f"{count} (Categorias*)"
+                        return str(count)
 
-                    if isinstance(data, list):
-                        count = len(data)
-                        valid_data = data
-                    elif isinstance(data, dict):
-                        # Algumas APIs retornam dict com indices ou objeto de erro
-                        if "user_info" in data: # Significa que a action falhou e retornou login info
-                            count = 0
-                        else:
-                            count = len(data)
-                            valid_data = data.values() # Converte valores do dict para lista iterável
+                    c3.metric("Status", "Online")
                     
-                    result[f"{key}_count"] = count
-
-                    # Lógica de Busca
-                    if search_name and count > 0:
-                        if key == "series":
-                            # Processamento especial para séries
-                            series_matches = [
-                                item for item in valid_data 
-                                if isinstance(item, dict) and normalized_search in normalize_text(item.get("name", ""))
-                            ]
-                            for series in series_matches:
-                                series_id = series.get("series_id")
-                                series_name = series.get("name")
-                                
-                                s_e = get_series_details(result['real_server'], username, password, series_id)
-
-                                if s_e:
-                                    result["search_matches"]["Séries"][series_name] = s_e
-                                else:
-                                    result["search_matches"]["Séries"][series_name] = "N/A"
-                        else:
-                            matches = [
-                                item.get("name") for item in valid_data 
-                                if isinstance(item, dict) and normalized_search in normalize_text(item.get("name", ""))
-                            ]
-                            if matches:
-                                if key == "live":
-                                    result["search_matches"]["Canais"].extend(matches)
-                                elif key == "vod":
-                                    result["search_matches"]["Filmes"].extend(matches)
-                except Exception as e:
-                    # Se der erro no request ou parse, assume 0
-                    result[f"{key}_count"] = 0
-                    continue
-
-        return parsed_url_data, result
-
-    except (requests.exceptions.RequestException, ValueError):
-        return parsed_url_data, result
-
-
-# Criação do formulário na interface
-with st.form(key="m3u_form"):
-    m3u_message = st.text_area("Cole a mensagem com URLs M3U ou Player API", key="m3u_input_value", height=200)
-    search_name = st.text_input("🔍 Buscar canal, filme ou série (opcional)", key="search_name")
-
-    col1, col2 = st.columns([1,1])
-    with col1:
-        submit_button = st.form_submit_button("🚀 Testar APIs (Rápido)")
-    with col2:
-        clear_button = st.form_submit_button("🧹 Limpar", on_click=clear_input)
-
-    if submit_button or st.session_state.get("form_submitted", False):
-        if not m3u_message:
-            st.warning("⚠️ Por favor, insira uma mensagem com URLs.")
-        else:
-            with st.spinner("Analisando APIs em paralelo... Isso pode levar alguns segundos."):
-                parsed_urls = parse_urls(m3u_message)
-
-                if not parsed_urls:
-                    st.warning("⚠️ Nenhuma URL válida encontrada na mensagem.")
-                else:
-                    results = []
-                    with ThreadPoolExecutor(max_workers=10) as executor:
-                        future_to_url = {executor.submit(get_xtream_info, url_data, search_name): url_data for url_data in parsed_urls}
-                        for future in as_completed(future_to_url):
-                            original_data, api_result = future.result()
-                            
-                            # Reconstrói a URL para exibição
-                            api_url_display = f"{original_data['base']}/player_api.php?username={original_data['username']}&password={original_data['password']}"
-
-                            results.append({
-                                "api_url": api_url_display,
-                                "username": original_data["username"],
-                                "password": original_data["password"],
-                                **api_result
-                            })
-
-                    results.sort(key=lambda item: item['is_json'], reverse=True)
-
                     st.markdown("---")
-                    st.markdown("#### Resultados")
+                    
+                    # Conteúdo
+                    k1, k2, k3 = st.columns(3)
+                    k1.info(f"📺 **Canais:** {format_count(r['live'], r['live_method'])}")
+                    k2.success(f"🎬 **Filmes:** {format_count(r['vod'], r['vod_method'])}")
+                    k3.warning(f"🍿 **Séries:** {format_count(r['series'], r['series_method'])}")
+                    
+                    if "Categories Only" in [r['live_method'], r['vod_method'], r['series_method']]:
+                        st.caption("(*) O servidor bloqueou a contagem individual de itens. O número exibido refere-se às pastas (Categorias) encontradas, confirmando que há conteúdo.")
 
-                    if not results:
-                        st.info("Nenhuma URL foi processada.")
-                    else:
-                        for result in results:
-                            status = "✅" if result["is_json"] else "❌"
-
-                            st.markdown(
-                                f"**{status} API URL:** <a href='{result['api_url']}' target='_blank'>{result['api_url']}</a>",
-                                unsafe_allow_html=True
-                            )
-
-                            with st.container(border=True):
-                                adult_emoji = "🔞 Contém" if result['has_adult_content'] else "✅ Não Contém"
-                                domain_emoji = "✅ Sim" if result['is_accepted_domain'] else "❌ Não"
-                                st.markdown(f"""
-                                - **Usuário:** `{result['username']}`
-                                - **Senha:** `{result['password']}`
-                                - **URL Real:** `{result['real_server']}`
-                                - **Expira em:** `{result['exp_date']}`
-                                - **Conexões:** `{result['active_cons']}` / `{result['max_connections']}`
-                                - **Domínio Aceito na TV:** {domain_emoji}
-                                - **Conteúdo Adulto:** {adult_emoji}
-                                - **Canais:** `{result['live_count']}`
-                                - **Filmes:** `{result['vod_count']}`
-                                - **Séries:** `{result['series_count']}`
-                                """)
-                                # Exibição dos resultados por subcategoria
-                                if search_name:
-                                    if any(result["search_matches"].values()):
-                                        st.markdown("**🔎 Resultados encontrados:**")
-                                        for category, matches in result["search_matches"].items():
-                                            if matches:
-                                                st.markdown(f"**{category}:**")
-                                                if category == "Séries":
-                                                    series_list = []
-                                                    for series_name, s_e_info in matches.items():
-                                                        if s_e_info != "N/A":
-                                                            series_list.append(f"- **{series_name}** ({s_e_info})")
-                                                        else:
-                                                            series_list.append(f"- **{series_name}** (Detalhes não disponíveis)")
-                                                    st.markdown("\n".join(series_list))
-                                                else:
-                                                    matches_text = "\n".join([f"- {match}" for match in matches])
-                                                    st.markdown(matches_text)
-                            st.markdown("---")
-
-if st.session_state.m3u_input_value:
-    st.session_state.form_submitted = True
-else:
-    st.session_state.form_submitted = False
+                    # Resultados da Busca
+                    if search_input:
+                        st.markdown("#### 🔎 Resultados da Busca")
+                        has_results = False
+                        for cat, items in r["matches"].items():
+                            if items:
+                                has_results = True
+                                with st.expander(f"{cat} Encontrados ({len(items)})"):
+                                    for i in items: st.text(f"- {i}")
+                        if not has_results:
+                            if "Categories Only" in [r['live_method'], r['vod_method'], r['series_method']]:
+                                st.warning("A busca detalhada falhou porque o servidor ocultou a lista de canais. Apenas verificação de login foi possível.")
+                            else:
+                                st.info("Nenhum item encontrado com esse nome.")
+            
+            else:
+                st.error(f"Falha ao logar em {r['base']}. Verifique usuário/senha ou se o DNS está offline.")
+            
+            # Área de Debug
+            with st.expander("🛠️ Ver Resposta Bruta (Debug JSON)"):
+                st.json(r.get("raw_debug"))
+                st.text(f"Raw Text Preview: {str(r.get('raw_debug'))[:500]}")
+            
+            st.markdown("---")
